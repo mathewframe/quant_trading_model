@@ -1,0 +1,37 @@
+---
+title: "Quantitative Trading Project"
+author: "Mathew Frame"
+format:
+  html:
+    embed-resources: true
+editor: visual
+---
+
+```{r}
+library(tidyverse)
+library(RTL)
+library(tidyquant)
+library(plotly)
+```
+
+```{r}
+#as this is the second time doing a QTP, I want to learn from my previous mistakes
+  #last time I selected my strategy on what I thought might have a chance to work. This time I want to incorporate clustering and other analytics before selecting a strategy.
+
+#step 1 will be gathering data, and clustering based on useful metrics.
+
+tickers <- c("SPY", "XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLV", "XLU", "XLY")
+
+data <- tidyquant::tq_get(tickers, from = "2000-01-01")
+
+plot_1 <- data %>% 
+  plotly::plot_ly(
+    x = ~date,
+    y = ~adjusted,
+    color = ~symbol,
+    type = "scatter",
+    mode = "lines"
+  )
+
+plot_1
+```

@@ -1,0 +1,92 @@
+# ──────────────────────────────────────────────
+# RStudio session files
+# Generated automatically by RStudio — machine-specific, never useful to commit
+# ──────────────────────────────────────────────
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+
+# ──────────────────────────────────────────────
+# R environment / package management
+# ──────────────────────────────────────────────
+renv/library/
+renv/local/
+renv/cellar/
+renv/lock/
+renv/python/
+renv/staging/
+packrat/
+
+# ──────────────────────────────────────────────
+# Quarto / knitr build cache
+# Scratch files created while rendering — safe to delete and re-render
+# ──────────────────────────────────────────────
+*_cache/
+*_files/
+.quarto/
+/_freeze/
+
+# ──────────────────────────────────────────────
+# Data files
+# CSVs excluded (raw data stays off GitHub)
+# Excel files (.xlsx) ARE tracked per project preference
+# ──────────────────────────────────────────────
+*.csv
+*.tsv
+*.rds
+*.RDS
+
+# ──────────────────────────────────────────────
+# Personal / private project context
+# Contains personal goals, class info, grading strategy — not for collaborators
+# ──────────────────────────────────────────────
+
+
+# ──────────────────────────────────────────────
+# Claude Code session files
+# ──────────────────────────────────────────────
+.claude/
+
+# ──────────────────────────────────────────────
+# Excel temp/lock files
+# ──────────────────────────────────────────────
+~$*
+
+# ──────────────────────────────────────────────
+# Credentials and secrets
+# NEVER commit API keys, passwords, or tokens
+# ──────────────────────────────────────────────
+.env
+.env.*
+secrets.R
+credentials.R
+*_credentials*
+*_secrets*
+
+# ──────────────────────────────────────────────
+# Shiny / deployment
+# Created when deploying to shinyapps.io or Posit Connect — machine-specific
+# ──────────────────────────────────────────────
+rsconnect/
+
+# ──────────────────────────────────────────────
+# R output and log files
+# ──────────────────────────────────────────────
+Rplots.pdf
+*.Rout
+*.log
+
+# ──────────────────────────────────────────────
+# Temporary and backup files
+# ──────────────────────────────────────────────
+tmp/
+temp/
+*.bak
+
+# ──────────────────────────────────────────────
+# OS junk
+# ──────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
