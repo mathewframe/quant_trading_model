@@ -303,3 +303,25 @@ Target language: "Regime 1 (inverted yield curve, VIX > 25, negative momentum) c
 14 of the 17 months surrounding the 2008 GFC and all 4 months of the 2020 COVID shock.
 A portfolio manager rotating into XLP, XLV, and XLU at the onset of each detected regime
 would have reduced max drawdown by X% relative to SPY, with a Sharpe improvement of Y."
+
+--- 
+
+### Macro Data Sources (all via tq_get unless noted)
+- VIX:              tq_get("^VIX", from = "2000-06-01")
+- 10Y Treasury:     tq_get("DGS10", get = "economic.data")   # FRED
+- 2Y Treasury:      tq_get("DGS2",  get = "economic.data")   # FRED
+- Yield curve slope: DGS10 - DGS2 (computed)
+- Credit spread:    HYG and IEI via tq_get() — spread = HYG return - IEI return
+- WTI (regime use): tq_get("CL=F") or RTL::getPrices() with roll adjust
+- Sector ETFs:      tq_get(c("SPY","XLB","XLC","XLE","XLF","XLI",
+                             "XLK","XLP","XLRE","XLV","XLU","XLY"))
+- Realized vol:     Computed from ETF log returns (rolling 21-day sd x sqrt(252))
+- Vol risk premium: VIX/100 - realized vol (computed)
+
+### Kalman Filter Implementation
+- Package: dlm (preferred) or KFAS
+- Apply to: yield slope, realized vol, and momentum BEFORE clustering
+- Purpose: smooth noisy rolling estimates so a 3-day spike doesn't trigger regime shift
+- Simple local level model per feature: dlmModPoly(order=1) + dlmFilter()
+- Output: filtered state estimates replace raw rolling values as clustering inputs
+

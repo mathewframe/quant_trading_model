@@ -1,37 +1,661 @@
 ---
-title: "Quantitative Trading Project"
+title: "Sector Rotation via Regime-Conditioned Clustering: A Three-Layer Quantitative Trading Model"
 author: "Mathew Frame"
+date: "06/04/2026"
 format:
   html:
     embed-resources: true
-editor: visual
+    toc: true
+    toc-depth: 3
+    theme: cosmo
 ---
 
-```{r}
+```{r setup}
+#| message: false
+#| warning: false
+#| echo: false
+
 library(tidyverse)
-library(RTL)
 library(tidyquant)
+library(RTL)
 library(plotly)
+library(gt)
+library(cluster)
+library(dlm)
+library(foreach)
+library(doParallel)
+library(PerformanceAnalytics)
+library(timetk)
+library(TTR)
+library(moments)
+library(factoextra)
+library(ggdendro)
+library(patchwork)
+library(scales)
 ```
 
-```{r}
-#as this is the second time doing a QTP, I want to learn from my previous mistakes
-  #last time I selected my strategy on what I thought might have a chance to work. This time I want to incorporate clustering and other analytics before selecting a strategy.
+------------------------------------------------------------------------
 
-#step 1 will be gathering data, and clustering based on useful metrics.
+## Executive Summary
 
-tickers <- c("SPY", "XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLV", "XLU", "XLY")
+*\[To be written last. 3 sentences: strategy thesis, training result, testing result.\]*
 
-data <- tidyquant::tq_get(tickers, from = "2000-01-01")
+------------------------------------------------------------------------
 
-plot_1 <- data %>% 
-  plotly::plot_ly(
-    x = ~date,
-    y = ~adjusted,
-    color = ~symbol,
-    type = "scatter",
-    mode = "lines"
+## 1. Intuitive Rationale
+
+### Strategy Thesis
+
+This strategy tests one hypothesis: that sector ETF returns are partially predictable by the prevailing macroeconomic regime. The mechanism being tested is whether an unsupervised clustering algorithm, applied to rolling macro features, can identify structural market states, and whether rotating into sector clusters that historically perform well in those states generates risk-adjusted returns above a passive SPY benchmark. This project does not assume the hypothesis is correct. It tests it honestly, with full acknowledgment of where and why it breaks down.
+
+Two academic papers motivate the design. Ajayi (2025) shows that K-Means clustering and parametric Markov Regime Switching models identify the same major market breaks: the 2008 financial crisis and the 2020 COVID shock. This provides evidence that unsupervised methods can detect economically meaningful regimes without requiring a distributional assumption. Raju (2025) uses rolling K-Means on equity data and finds that defensive sectors consistently outperform in stress regimes, with Sharpe ratio differentials of 2 to 4 points (p \< 0.01 across all factor types). This project adapts their rolling window specification (3-month window, 1-month lag, majority voting) to U.S. sector ETFs.
+
+Raju (2025) specifically uses Wasserstein K-Means, which measures the "earth mover's distance" between full return distributions rather than Euclidean distance between centroids. This captures tail behavior more completely than standard K-Means. However, with only 11 sector ETFs in the asset clustering layer, reliable distribution estimation is not feasible; the sample size does not support stable tail characterization. Euclidean K-Means on PCA-reduced features is the more defensible choice at this scale. The regime clustering layer, which operates on hundreds of rolling time windows, would be a better candidate for Wasserstein distance, and this is acknowledged as a limitation.
+
+A critical limitation when applying Raju's findings to U.S. markets is price synchronicity. Morck, Yeung, and Yu (2000) demonstrate that developed markets like the U.S. have low stock return synchronicity: stocks move on firm-specific news rather than macro signals, producing low R-squared values in market-model regressions. Emerging markets like India, where Raju's study is conducted, have high synchronicity; regime-level macro signals explain a larger share of cross-sectional return variation, making clustering more powerful. In the U.S., higher idiosyncratic variation means regime signals are noisier and Raju's Sharpe ratio differentials of 2 to 4 points should be treated as an upper bound, not a replication target. Morck, Kim, and Yeung (2007) connect this to Schumpeter's creative destruction: U.S. boom-bust cycles channel capital to innovative firms at overvalued prices, which is functionally efficient even when irrational in appearance. The implication for this strategy is two-sided. Greater sector return dispersion in the U.S. creates more differentiated clusters and more meaningful rotation opportunities. But faster and more violent regime transitions, the product of the same creative destruction dynamic, reinforce both identified failure modes and suggest that U.S. performance will fall below Raju's Indian benchmarks even where the method is otherwise well-specified.
+
+### Stated Hypotheses (Before Computing)
+
+The following hypotheses are stated before any clustering is performed. Results will be honestly assessed against these priors.
+
+**Asset clustering hypothesis:** XLV, XLP, XLU, and XLRE will cluster together as defensive assets (low beta, low vol, high downside capture). XLK, XLY, and XLI will form a cyclical growth cluster. XLE and XLB will form a commodity-sensitive cluster. XLF and XLC will occupy a hybrid or rate-sensitive cluster.
+
+**Regime clustering hypothesis:** The Gap statistic and silhouette analysis will support k = 3 regimes: a growth/low-volatility regime, a stress/high-volatility regime, and a transitional or inflationary regime. If k = 2 wins, the data only distinguishes risk-on from risk-off. If k = 4 wins, commodity-driven periods separate cleanly from rate-shock periods.
+
+**Signal bridge hypothesis:** In a growth regime, overweighting the cyclical cluster and underweighting defensives will generate excess returns. In a stress regime, rotating into defensives will reduce drawdown at the cost of some upside. In a commodity/inflation regime, the energy and materials cluster will outperform.
+
+### When This Strategy Fails
+
+This strategy is designed for regime persistence, not regime transitions, and will fail in two specific environments.
+
+The first is **speed of transition.** Tail events (market crashes, liquidity shocks, sudden policy changes) move faster than a monthly rebalancing cycle can capture. With a 1-month implementation lag, the portfolio will remain in the prior regime's cluster for the entire month following a shock. Even a single day of full exposure in the wrong cluster during a severe drawdown can offset weeks of accumulated gains. The 2008 financial crisis and March 2020 COVID crash are the clearest historical examples of this failure mode.
+
+The second is **correlation collapse.** The signal bridge assumes meaningful return dispersion across clusters: that defensives and cyclicals behave differently in a given regime. During systemic shocks, all 11 ETFs correlate toward 1.0. Rotating from XLK to XLV does not protect capital if both are falling 30% simultaneously. The assumption that underpins the entire strategy (that cluster membership conveys diversification benefit) breaks precisely when risk management matters most. The Kalman filter reduces unnecessary pivots between regimes, but it cannot restore diversification when none exists.
+
+------------------------------------------------------------------------
+
+## 2. Data and Features
+
+### 2.1 Data Sources
+
+```{r data-sources-table}
+#| message: false
+#| warning: false
+#| echo: false
+
+tibble(
+  Series = c(
+    "SPY, XLB, XLC, XLE, XLF, XLI, XLK, XLP, XLRE, XLV, XLU, XLY",
+    "^VIX",
+    "DGS10",
+    "DGS2",
+    "HYG, IEI",
+    "CL=F"
+  ),
+  Description = c(
+    "S&P 500 + 11 Select Sector SPDR ETFs (adjusted close)",
+    "CBOE Volatility Index (implied vol proxy)",
+    "10-Year Treasury Constant Maturity Rate",
+    "2-Year Treasury Constant Maturity Rate",
+    "High Yield (HYG) and Intermediate Treasury (IEI) ETFs for credit spread",
+    "WTI Crude Oil front-month futures (regime feature)"
+  ),
+  Source = c(
+    "Yahoo Finance via tq_get()",
+    "Yahoo Finance via tq_get()",
+    "FRED via tq_get(economic.data)",
+    "FRED via tq_get(economic.data)",
+    "Yahoo Finance via tq_get()",
+    "Yahoo Finance via tq_get()"
+  ),
+  `Training Period` = rep("Jun 2000 – Dec 2024", 6),
+  `Testing Period`  = rep("Jan 2025 – Mar 2026", 6),
+  Notes = c(
+    "XLC from Jun 2018; XLRE from Oct 2015",
+    "Daily close",
+    "Daily, forward-filled for weekends/holidays",
+    "Daily, forward-filled for weekends/holidays",
+    "HYG from Apr 2007",
+    "Front-month continuous contract"
+  )
+) %>%
+  gt::gt() %>%
+  gt::tab_header(
+    title    = "Data Sources",
+    subtitle = "All data loaded via API — no local files"
+  ) %>%
+  gt::tab_style(
+    style     = gt::cell_text(weight = "bold"),
+    locations = gt::cells_column_labels()
+  )
+```
+
+### 2.2 ETF Data Pull and Log Returns
+
+```{r etf-data}
+#| message: false
+#| warning: false
+#| echo: false
+#| cache: true
+
+tickers <- c("SPY", "XLB", "XLC", "XLE", "XLF", "XLI",
+             "XLK", "XLP", "XLRE", "XLV", "XLU", "XLY")
+
+etf_raw <- tidyquant::tq_get(
+  tickers,
+  from = "2000-06-01",
+  to   = "2026-03-31"
+)
+
+# Log returns per ticker — NA on first observation per symbol is expected
+etf_returns <- etf_raw %>%
+  dplyr::group_by(symbol) %>%
+  dplyr::arrange(date) %>%
+  dplyr::mutate(ret = log(adjusted / dplyr::lag(adjusted))) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(!is.na(ret))
+
+# Training / testing split — date filter only, never slice()
+TRAIN_END  <- "2024-12-31"
+TEST_START <- "2025-01-01"
+
+etf_train <- etf_returns %>% dplyr::filter(date <= TRAIN_END)
+etf_test  <- etf_returns %>% dplyr::filter(date >= TEST_START)
+```
+
+### 2.3 Macro Data Pull
+
+```{r macro-data}
+#| message: false
+#| warning: false
+#| echo: false
+#| cache: true
+
+# VIX
+vix_raw <- tidyquant::tq_get("^VIX", from = "2000-06-01", to = "2026-03-31") %>%
+  dplyr::select(date, vix = adjusted)
+
+# 10Y and 2Y Treasury from FRED
+dgs10_raw <- tidyquant::tq_get("DGS10", get = "economic.data",
+                                from = "2000-06-01", to = "2026-03-31") %>%
+  dplyr::rename(dgs10 = price)
+
+dgs2_raw <- tidyquant::tq_get("DGS2", get = "economic.data",
+                               from = "2000-06-01", to = "2026-03-31") %>%
+  dplyr::rename(dgs2 = price)
+
+# Credit spread proxy: HYG and IEI log returns
+hyg_raw <- tidyquant::tq_get("HYG", from = "2000-06-01", to = "2026-03-31") %>%
+  dplyr::group_by(symbol) %>%
+  dplyr::arrange(date) %>%
+  dplyr::mutate(ret_hyg = log(adjusted / dplyr::lag(adjusted))) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(date, ret_hyg)
+
+iei_raw <- tidyquant::tq_get("IEI", from = "2000-06-01", to = "2026-03-31") %>%
+  dplyr::group_by(symbol) %>%
+  dplyr::arrange(date) %>%
+  dplyr::mutate(ret_iei = log(adjusted / dplyr::lag(adjusted))) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(date, ret_iei)
+
+# WTI front-month via Yahoo
+wti_raw <- tidyquant::tq_get("CL=F", from = "2000-06-01", to = "2026-03-31") %>%
+  dplyr::select(date, wti = adjusted) %>%
+  dplyr::arrange(date)
+
+# Merge onto SPY trading-day spine
+date_spine <- etf_returns %>%
+  dplyr::filter(symbol == "SPY") %>%
+  dplyr::select(date)
+
+macro_daily <- date_spine %>%
+  dplyr::left_join(vix_raw,                              by = "date") %>%
+  dplyr::left_join(dgs10_raw %>% dplyr::select(date, dgs10), by = "date") %>%
+  dplyr::left_join(dgs2_raw  %>% dplyr::select(date, dgs2),  by = "date") %>%
+  dplyr::left_join(hyg_raw,                              by = "date") %>%
+  dplyr::left_join(iei_raw,                              by = "date") %>%
+  dplyr::left_join(wti_raw,                              by = "date") %>%
+  # FRED series have gaps on weekends/holidays — forward fill
+  tidyr::fill(dgs10, dgs2, wti, .direction = "down") %>%
+  dplyr::mutate(
+    yield_slope   = dgs10 - dgs2,       # positive = normal curve, negative = inverted
+    credit_spread = ret_hyg - ret_iei   # HYG minus IEI daily return proxy
   )
 
-plot_1
+macro_train <- macro_daily %>% dplyr::filter(date <= TRAIN_END)
+macro_test  <- macro_daily %>% dplyr::filter(date >= TEST_START)
 ```
+
+### 2.4 ETF Price History
+
+```{r price-chart}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-height: 5
+
+price_normalized <- etf_raw %>%
+  dplyr::group_by(symbol) %>%
+  dplyr::arrange(date) %>%
+  dplyr::mutate(indexed = 100 * adjusted / dplyr::first(adjusted)) %>%
+  dplyr::ungroup()
+
+plotly::plot_ly(
+  data = price_normalized,
+  x    = ~date,
+  y    = ~indexed,
+  color = ~symbol,
+  type = "scatter",
+  mode = "lines",
+  line = list(width = 1.2)
+) %>%
+  plotly::layout(
+    title = list(
+      text = "<b>Sector ETF Performance (Indexed to 100 at inception)</b><br><sup>Source: Yahoo Finance via tidyquant::tq_get()</sup>"
+    ),
+    xaxis     = list(title = "Date"),
+    yaxis     = list(title = "Index (100 = start date per ticker)"),
+    hovermode = "x unified"
+  )
+```
+
+The indexed price chart reveals the structural differences between sector clusters before any formal analysis. Technology (XLK) and Consumer Discretionary (XLY) substantially outperform over the full training period, consistent with the growth-oriented cluster hypothesis. Energy (XLE) shows high volatility with long drawdown periods, reflecting commodity price cycles rather than market beta, an important distinction that will surface in the asset clustering PCA. Defensive sectors (XLV, XLP, XLU) exhibit smoother trajectories with smaller peak-to-trough declines, particularly visible during 2008–2009 and 2022, validating the prior that these ETFs share a common structural character. XLC and XLRE begin later in the sample (2018 and 2015 respectively); their shorter histories will be noted in the clustering analysis but do not disqualify them from inclusion.
+
+------------------------------------------------------------------------
+
+## 3. Asset Clustering (Layer 1)
+
+### 3.1 Feature Engineering
+
+```{r asset-features}
+#| message: false
+#| warning: false
+#| echo: false
+
+# All features computed on training data only — zero look-ahead
+spy_train <- etf_train %>%
+  dplyr::filter(symbol == "SPY") %>%
+  dplyr::select(date, ret_spy = ret)
+
+asset_features <- etf_train %>%
+  dplyr::left_join(spy_train, by = "date") %>%
+  dplyr::group_by(symbol) %>%
+  dplyr::summarise(
+    n_obs        = dplyr::n(),
+    mean_ret     = mean(ret, na.rm = TRUE) * 252,
+    volatility   = sd(ret,  na.rm = TRUE) * sqrt(252),
+    sharpe       = mean_ret / volatility,
+    sortino      = mean_ret / (sd(ret[ret < 0], na.rm = TRUE) * sqrt(252)),
+    skewness     = moments::skewness(ret, na.rm = TRUE),
+    kurtosis     = moments::kurtosis(ret, na.rm = TRUE),
+    beta         = cov(ret, ret_spy, use = "complete.obs") / var(ret_spy, na.rm = TRUE),
+    max_dd       = as.numeric(PerformanceAnalytics::maxDrawdown(
+                     xts::xts(ret, order.by = date))),
+    var_5pct     = quantile(ret, 0.05, na.rm = TRUE),
+    cvar_5pct    = mean(ret[ret <= quantile(ret, 0.05, na.rm = TRUE)], na.rm = TRUE),
+    omega        = sum(ret[ret > 0], na.rm = TRUE) / abs(sum(ret[ret < 0], na.rm = TRUE)),
+    up_capture   = mean(ret[ret_spy > 0], na.rm = TRUE) /
+                   mean(ret_spy[ret_spy > 0], na.rm = TRUE),
+    down_capture = mean(ret[ret_spy < 0], na.rm = TRUE) /
+                   mean(ret_spy[ret_spy < 0], na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::filter(symbol != "SPY")
+
+# Average pairwise correlation (excluding SPY)
+ret_wide_train <- etf_train %>%
+  dplyr::filter(symbol != "SPY") %>%
+  dplyr::select(date, symbol, ret) %>%
+  tidyr::pivot_wider(names_from = symbol, values_from = ret) %>%
+  dplyr::select(-date)
+
+cor_mat <- cor(ret_wide_train, use = "pairwise.complete.obs")
+
+avg_corr <- tibble::tibble(
+  symbol   = rownames(cor_mat),
+  avg_corr = (rowSums(cor_mat, na.rm = TRUE) - 1) / (ncol(cor_mat) - 1)
+)
+
+asset_features <- asset_features %>%
+  dplyr::left_join(avg_corr, by = "symbol")
+```
+
+```{r asset-features-table}
+#| message: false
+#| warning: false
+#| echo: false
+
+asset_features %>%
+  dplyr::select(symbol, mean_ret, volatility, sharpe, sortino, beta,
+                max_dd, omega, up_capture, down_capture, avg_corr) %>%
+  dplyr::arrange(beta) %>%
+  gt::gt() %>%
+  gt::tab_header(
+    title    = "Sector ETF Feature Summary",
+    subtitle = "Training period June 2000 to December 2024. All features annualized where applicable."
+  ) %>%
+  gt::fmt_percent(columns = c(mean_ret, volatility, max_dd), decimals = 1) %>%
+  gt::fmt_number(columns  = c(sharpe, sortino, beta, omega,
+                               up_capture, down_capture, avg_corr), decimals = 2) %>%
+  gt::cols_label(
+    symbol       = "ETF",
+    mean_ret     = "Ann. Return",
+    volatility   = "Ann. Vol",
+    sharpe       = "Sharpe",
+    sortino      = "Sortino",
+    beta         = "Beta",
+    max_dd       = "Max DD",
+    omega        = "Omega",
+    up_capture   = "Up Capture",
+    down_capture = "Down Capture",
+    avg_corr     = "Avg Corr"
+  ) %>%
+  gt::tab_source_note("Source: Yahoo Finance via tidyquant::tq_get(). Sorted by beta ascending.")
+```
+
+The feature table reveals the structural spread across sectors before any clustering. XLRE and XLU sit at the low-beta end of the universe, anchoring what will likely become the defensive cluster, while XLK and XLY show both the highest returns and highest betas over the training period. XLE stands out for its high volatility and maximum drawdown relative to its Omega ratio, reflecting the commodity price cycle dynamics noted in the price chart. Up and down capture ratios together describe asymmetry: sectors with down capture below 1.0 are candidates for a stress-regime rotation. The average pairwise correlation column will inform the cluster separation validation; higher values indicate a sector moves more synchronously with the rest of the universe and contributes less to portfolio diversification.
+
+### 3.2 Feature Selection
+
+Five features are selected for clustering. Each answers a distinct question about how an ETF will behave across different macro regimes, and no two measure the same underlying property.
+
+-   **Beta:** How much does this ETF amplify or dampen broad market moves? This is the core defensive vs. cyclical axis. Low-beta sectors (XLV, XLU) preserve capital in drawdowns; high-beta sectors (XLK, XLY) accelerate in bull markets.
+-   **Mean annualized return:** What is the baseline return expectation over a full training cycle? This separates high-growth secular winners from low-growth defensive anchors, independent of how much risk was taken to earn those returns.
+-   **CVaR (5%):** What is the average loss in the worst 5% of trading days? This is the most regime-sensitive risk measure. Defensive sectors have shallower tail losses; cyclicals and commodities have deep ones precisely when macro stress is highest.
+-   **Average pairwise correlation:** How independently does this ETF move relative to its peers? Sectors with low average correlation (notably XLE) carry information not explained by the broad market and form their own rotation bucket.
+-   **Skewness:** Is the return distribution positively or negatively skewed? Energy sectors exhibit positive skew from commodity price spikes; defensives tend toward slight negative skew from slow, steady erosion. This feature distinguishes commodity-sensitive ETFs from both cyclicals and defensives.
+
+These five features are conceptually orthogonal: market sensitivity, return level, tail risk, peer independence, and distribution shape each capture something the others do not. K-Means therefore clusters on genuinely distinct axes. PCA is reserved for Layer 2 regime clustering, where the macro features are correlated by construction and dimensionality reduction earns its place.
+
+### 3.3 K-Means and Hierarchical Clustering
+
+```{r clustering-fit}
+#| message: false
+#| warning: false
+#| echo: false
+
+# 5 manually selected features -- conceptually orthogonal, no PCA needed
+cluster_features <- c("beta", "mean_ret", "cvar_5pct", "avg_corr", "skewness")
+
+feat_mat5 <- asset_features %>%
+  dplyr::select(dplyr::all_of(cluster_features)) %>%
+  as.matrix()
+rownames(feat_mat5) <- asset_features$symbol
+
+feat_scaled5 <- scale(feat_mat5)
+
+# K-Means for k = 2, 3, 4 -- evaluate by silhouette
+set.seed(452)
+km_list <- purrr::map(2:4, function(k) {
+  km  <- kmeans(feat_scaled5, centers = k, nstart = 50, iter.max = 200)
+  sil <- cluster::silhouette(km$cluster, dist(feat_scaled5))
+  list(k = k, model = km, avg_sil = mean(sil[, 3]), sil_obj = sil)
+})
+
+sil_df <- purrr::map_dfr(km_list, ~ tibble::tibble(
+  k              = .x$k,
+  avg_silhouette = round(.x$avg_sil, 3),
+  wss            = round(.x$model$tot.withinss, 2)
+))
+
+# Select best k by silhouette
+best_idx <- which.max(sil_df$avg_silhouette)
+best_k   <- sil_df$k[best_idx]
+best_km  <- km_list[[best_idx]]$model
+
+# Hierarchical clustering (Ward's method, same 5-feature scaled matrix)
+dist_mat <- dist(feat_scaled5, method = "euclidean")
+hc_model <- hclust(dist_mat, method = "ward.D2")
+hc_labs  <- cutree(hc_model, k = best_k)
+
+# Merge cluster assignments with features
+cluster_tbl <- asset_features %>%
+  dplyr::mutate(
+    km_cluster = best_km$cluster,
+    hc_cluster = hc_labs
+  )
+
+# Assign commercial names to K-Means clusters based on mean beta rank
+cluster_chars <- cluster_tbl %>%
+  dplyr::group_by(km_cluster) %>%
+  dplyr::summarise(
+    mean_beta  = mean(beta),
+    mean_vol   = mean(volatility),
+    mean_omega = mean(omega),
+    mean_dd    = mean(max_dd),
+    .groups    = "drop"
+  ) %>%
+  dplyr::arrange(mean_beta) %>%
+  dplyr::mutate(
+    cluster_label = dplyr::case_when(
+      best_k == 2 & dplyr::row_number() == 1 ~ "Defensive",
+      best_k == 2 & dplyr::row_number() == 2 ~ "Cyclical Growth",
+      best_k == 3 & dplyr::row_number() == 1 ~ "Defensive",
+      best_k == 3 & dplyr::row_number() == 2 ~ "Commodity / Rate-Sensitive",
+      best_k == 3 & dplyr::row_number() == 3 ~ "Cyclical Growth",
+      best_k == 4 & dplyr::row_number() == 1 ~ "Defensive",
+      best_k == 4 & dplyr::row_number() == 2 ~ "Rate-Sensitive",
+      best_k == 4 & dplyr::row_number() == 3 ~ "Commodity",
+      best_k == 4 & dplyr::row_number() == 4 ~ "Cyclical Growth",
+      TRUE ~ paste0("Cluster ", dplyr::row_number())
+    )
+  )
+
+cluster_tbl <- cluster_tbl %>%
+  dplyr::left_join(
+    cluster_chars %>% dplyr::select(km_cluster, cluster_label),
+    by = "km_cluster"
+  )
+```
+
+```{r clustering-silhouette-table}
+#| message: false
+#| warning: false
+#| echo: false
+
+sil_df %>%
+  gt::gt() %>%
+  gt::tab_header(
+    title    = "K-Means Cluster Selection: Silhouette Width and WSS",
+    subtitle = "Higher silhouette = better-separated clusters; lower WSS = tighter clusters"
+  ) %>%
+  gt::cols_label(
+    k              = "k",
+    avg_silhouette = "Avg. Silhouette",
+    wss            = "Total WSS"
+  ) %>%
+  gt::fmt_number(columns = avg_silhouette, decimals = 3) %>%
+  gt::fmt_number(columns = wss, decimals = 2) %>%
+  gt::tab_style(
+    style = gt::cell_fill(color = "#d4edda"),
+    locations = gt::cells_body(rows = avg_silhouette == max(avg_silhouette))
+  ) %>%
+  gt::tab_source_note("Clustering performed on 5 manually selected scaled features. nstart = 50.")
+```
+
+```{r clustering-kmeans-plot}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-width: 8
+#| fig-height: 6
+
+cluster_palette <- c("#2c7bb6", "#d7191c", "#1a9641", "#fdae61")[1:best_k]
+
+# Primary commercial plot: beta vs mean_ret colored by cluster
+p_km_scatter <- ggplot(cluster_tbl,
+    aes(x = beta, y = mean_ret, colour = cluster_label, label = symbol)) +
+  geom_point(size = 4, alpha = 0.85) +
+  ggrepel::geom_text_repel(size = 3.5, fontface = "bold", show.legend = FALSE) +
+  scale_colour_manual(values = cluster_palette) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title    = paste0("Asset Clusters (k = ", best_k, "): Beta vs. Annualized Return"),
+    subtitle = "Each point is one sector ETF; color denotes cluster assignment",
+    x        = "Beta to SPY",
+    y        = "Annualized Return (%)",
+    colour   = "Cluster",
+    caption  = "Training period June 2000 to December 2024. Clustering on 5 scaled features."
+  ) +
+  theme_minimal(base_size = 11)
+
+p_km_scatter
+
+# Secondary: fviz_cluster for full 5D geometry projected to 2D
+p_km_fviz <- factoextra::fviz_cluster(
+  best_km,
+  data        = feat_scaled5,
+  geom        = c("point", "text"),
+  repel       = TRUE,
+  ggtheme     = theme_minimal(base_size = 11),
+  palette     = cluster_palette
+) +
+  labs(
+    title    = paste0("K-Means Cluster Geometry (k = ", best_k, "): 5-Feature Space Projected to 2D"),
+    subtitle = "Axes are first two PCA dimensions for display only; clustering used all 5 features",
+    caption  = "Training period June 2000 to December 2024."
+  )
+
+p_km_fviz
+```
+
+```{r clustering-dendrogram}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-width: 8
+#| fig-height: 5
+
+dend_df   <- ggdendro::dendro_data(hc_model, type = "rectangle")
+cut_height <- (rev(hc_model$height)[best_k - 1] + rev(hc_model$height)[best_k]) / 2
+
+p_dend <- ggplot() +
+  geom_segment(
+    data = dend_df$segments,
+    aes(x = x, y = y, xend = xend, yend = yend)
+  ) +
+  geom_text(
+    data  = dend_df$labels,
+    aes(x = x, y = y, label = label),
+    hjust = 1, size = 3.5, nudge_y = -0.01
+  ) +
+  geom_hline(yintercept = cut_height, linetype = "dashed",
+             colour = "#d7191c", linewidth = 0.8) +
+  annotate("text", x = 1, y = cut_height * 1.08,
+           label = paste0("Cut for k = ", best_k), colour = "#d7191c", size = 3) +
+  coord_flip() +
+  scale_y_reverse() +
+  labs(
+    title    = "Hierarchical Clustering Dendrogram (Ward's Method)",
+    subtitle = "Red dashed line shows cut height for selected k",
+    x        = NULL,
+    y        = "Linkage Distance",
+    caption  = "Euclidean distance on 5 scaled features (beta, mean_ret, cvar_5pct, avg_corr, skewness). Ward's D2 linkage."
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.y = element_blank(), axis.ticks.y = element_blank())
+
+p_dend
+```
+
+```{r clustering-summary-table}
+#| message: false
+#| warning: false
+#| echo: false
+
+# Omega weights within each cluster
+omega_weights <- cluster_tbl %>%
+  dplyr::group_by(cluster_label) %>%
+  dplyr::mutate(
+    omega_weight = omega / sum(omega)
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(symbol, cluster_label, beta, volatility, sharpe, omega,
+                max_dd, down_capture, omega_weight) %>%
+  dplyr::arrange(cluster_label, dplyr::desc(omega_weight))
+
+# Save weights for use in signal bridge
+cluster_weights <- omega_weights %>%
+  dplyr::select(symbol, cluster_label, omega_weight)
+
+omega_weights %>%
+  gt::gt(groupname_col = "cluster_label") %>%
+  gt::tab_header(
+    title    = "Asset Cluster Assignments and Omega-Weighted Position Sizes",
+    subtitle = "Omega weight = within-cluster Omega ratio normalized to sum 1.0"
+  ) %>%
+  gt::fmt_percent(columns = c(volatility, max_dd, omega_weight), decimals = 1) %>%
+  gt::fmt_number(columns  = c(beta, sharpe, omega, down_capture), decimals = 2) %>%
+  gt::cols_label(
+    symbol       = "ETF",
+    beta         = "Beta",
+    volatility   = "Ann. Vol",
+    sharpe       = "Sharpe",
+    omega        = "Omega",
+    max_dd       = "Max DD",
+    down_capture = "Down Capture",
+    omega_weight = "Omega Weight"
+  ) %>%
+  gt::tab_style(
+    style     = gt::cell_fill(color = "#f0f4ff"),
+    locations = gt::cells_row_groups()
+  ) %>%
+  gt::tab_source_note("Position sizes are static weights derived from training period only. Applied forward to both training and testing periods.")
+```
+
+The silhouette table identifies which k produces the best-separated clusters; the highlighted row is the selected value. The beta vs. annualized return scatter is the primary commercial visualization: it shows directly whether the algorithm has separated defensive low-beta ETFs from cyclical high-beta ones, which is the core claim of the strategy. The fviz projection confirms the cluster geometry in a higher-dimensional sense, but the scatter is the one a portfolio manager would actually act on. The dendrogram provides independent validation from hierarchical clustering using Ward's method; agreement between K-Means and hierarchical assignments on the same ETFs confirms the groupings reflect genuine structural similarity rather than algorithmic artifact. The final summary table assigns commercial names based on mean beta rank and computes Omega-weighted position sizes, which serve as the static within-cluster allocation rule throughout both the training and testing backtests.
+
+------------------------------------------------------------------------
+
+## 4. Kalman Filter (Pre-processing for Regime Clustering)
+
+*\[Apply dlmFilter to yield slope, realized vol, momentum before regime clustering\]*
+
+------------------------------------------------------------------------
+
+## 5. Regime Clustering (Layer 2)
+
+*\[Rolling 3-month windows on Kalman-smoothed macro features, PCA, k-selection, majority voting, regime timeline\]*
+
+------------------------------------------------------------------------
+
+## 6. Signal Bridge and Statistical Significance
+
+*\[Regime → cluster mapping, t-tests, Memmel z-test, Holm-Bonferroni, endogeneity check\]*
+
+------------------------------------------------------------------------
+
+## 7. Mental Model and Execution Rules
+
+*\[Mermaid diagram, signal lag, Omega-weighted position sizing, defensive trigger\]*
+
+------------------------------------------------------------------------
+
+## 8. Training Period Backtest (Jun 2000 – Dec 2024)
+
+*\[Equity curve vs SPY, drawdown chart, full performance table\]*
+
+------------------------------------------------------------------------
+
+## 9. Optimization
+
+*\[Strategy function, grid search, heat map, parameter selection with risk appetite justification\]*
+
+------------------------------------------------------------------------
+
+## 10. Testing Period Backtest (Jan 2025 – Mar 2026)
+
+*\[Same charts as training, honest out-of-sample assessment\]*
+
+------------------------------------------------------------------------
+
+## 11. Risk Appetite Statement
+
+*\[Explicit, quantified: max DD tolerance, optimization objective, position sizing rule, defensive trigger\]*
+
+------------------------------------------------------------------------
+
+## 12. Lessons Learned
+
+*\[Minimum 5 points × 3-5 sentences each, referencing FIN 440 QTP failures explicitly\]*
