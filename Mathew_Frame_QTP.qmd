@@ -2571,6 +2571,12 @@ run_strategy <- function(lookback_roll, sma_window, sig_thresh, mag_thresh,
   r <- diff(pv_h) / head(pv_h, -1)
   r <- r[is.finite(r)]
 
+  sortino_r <- {
+    excess <- r - 0
+    dd_sq  <- mean(pmin(excess, 0)^2, na.rm = TRUE)
+    if (dd_sq == 0) NA_real_ else mean(excess, na.rm = TRUE) * 252 / sqrt(dd_sq * 252)
+  }
+
   tibble::tibble(
     lookback_roll = lookback_roll,
     sma_window    = sma_window,
@@ -2579,7 +2585,10 @@ run_strategy <- function(lookback_roll, sma_window, sig_thresh, mag_thresh,
     omega         = omega_ratio(r),
     calmar_r      = calmar(r),
     sharpe        = mean(r, na.rm = TRUE) / sd(r, na.rm = TRUE) * sqrt(252),
-    max_dd_pct    = round(max_dd(r) * 100, 2)
+    sortino       = sortino_r,
+    ann_ret_pct   = ann_ret(r) * 100,
+    max_dd_pct    = round(max_dd(r) * 100, 2),
+    hit_rate      = mean(r > 0, na.rm = TRUE) * 100
   )
 }
 ```
@@ -2757,9 +2766,109 @@ plotly::plot_ly(
 
 Grid 2 is noisier than Grid 1, which confirms that window parameters drive less of the performance difference than thresholds do. The selected lookback of 50 days and SMA of 23 days sit in an elevated region but the surface has more variance around them. The 3-day difference between SMA = 20 and SMA = 23 is not meaningful in isolation; the takeaway is that the strategy is not sensitive to small changes in window length. The slightly shorter lookback of 50 days versus the default of 60 makes intuitive sense: it allows the clustering features to respond to recent regime changes without sacrificing stability.
 
-### 9.4 Selected Parameters
+### 9.4 Multi-Metric Z-Score Heatmaps
 
-The surfaces above show which parameter combinations produce the highest Omega Ratio on the training period. The final parameters are selected from the intersection of a high-Omega region and a Calmar Ratio above 0.10, which filters out combinations that inflate returns at the cost of large drawdowns. Parameters near the edge of the search range are treated with skepticism: a peak at the boundary suggests the optimum lies outside the grid and the apparent result may not generalize.
+A single-metric optimization surface (Omega alone) risks selecting parameters that win on one dimension while quietly losing on others. The Z-score heatmap normalizes every metric to a common scale -- $(x - \mu) / \sigma$ across the grid -- and plots all of them simultaneously. Blue cells are above-average for that metric, red cells are below-average. A parameter combination that is consistently blue across all panels is a genuinely robust choice. A combination that peaks on Omega but turns red on drawdown or hit rate is a warning sign. For max drawdown, a higher (less negative) value is better, so blue still means good.
+
+```{r opt-zscore1}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-width: 11
+#| fig-height: 9
+
+metrics_long1 <- opt1 %>%
+  dplyr::select(sig_thresh, mag_thresh,
+                Omega = omega, Calmar = calmar_r, Sharpe = sharpe,
+                Sortino = sortino, `Ann. Return` = ann_ret_pct,
+                `Max DD` = max_dd_pct, `Hit Rate` = hit_rate) %>%
+  tidyr::pivot_longer(
+    cols      = -c(sig_thresh, mag_thresh),
+    names_to  = "metric",
+    values_to = "value"
+  ) %>%
+  dplyr::group_by(metric) %>%
+  dplyr::mutate(valueZ = (value - mean(value, na.rm = TRUE)) /
+                          sd(value, na.rm = TRUE)) %>%
+  dplyr::ungroup()
+
+ggplot(metrics_long1, aes(x = sig_thresh, y = mag_thresh, fill = valueZ)) +
+  geom_raster(interpolate = TRUE) +
+  facet_wrap(~metric, scales = "free") +
+  scale_fill_gradient2(
+    low      = "red",
+    mid      = "white",
+    high     = "blue",
+    midpoint = 0,
+    name     = "Z-Score"
+  ) +
+  scale_x_continuous(labels = scales::number_format(accuracy = 0.01)) +
+  scale_y_continuous(labels = scales::number_format(accuracy = 0.01)) +
+  theme_minimal(base_size = 10) +
+  theme(
+    panel.grid   = element_blank(),
+    strip.text   = element_text(face = "bold")
+  ) +
+  labs(
+    title    = "Grid 1: Multi-Metric Z-Score Heatmap (Thresholds)",
+    subtitle = "Blue = above average for that metric. Consistent blue across panels = robust parameter combination.",
+    x        = "Signal Threshold",
+    y        = "Magnitude Threshold",
+    caption  = "Lookback = 60 days, SMA = 20 days. Training period only."
+  )
+```
+
+```{r opt-zscore2}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-width: 11
+#| fig-height: 9
+
+metrics_long2 <- opt2 %>%
+  dplyr::select(lookback_roll, sma_window,
+                Omega = omega, Calmar = calmar_r, Sharpe = sharpe,
+                Sortino = sortino, `Ann. Return` = ann_ret_pct,
+                `Max DD` = max_dd_pct, `Hit Rate` = hit_rate) %>%
+  tidyr::pivot_longer(
+    cols      = -c(lookback_roll, sma_window),
+    names_to  = "metric",
+    values_to = "value"
+  ) %>%
+  dplyr::group_by(metric) %>%
+  dplyr::mutate(valueZ = (value - mean(value, na.rm = TRUE)) /
+                          sd(value, na.rm = TRUE)) %>%
+  dplyr::ungroup()
+
+ggplot(metrics_long2, aes(x = sma_window, y = lookback_roll, fill = valueZ)) +
+  geom_raster(interpolate = TRUE) +
+  facet_wrap(~metric, scales = "free") +
+  scale_fill_gradient2(
+    low      = "red",
+    mid      = "white",
+    high     = "blue",
+    midpoint = 0,
+    name     = "Z-Score"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    panel.grid = element_blank(),
+    strip.text = element_text(face = "bold")
+  ) +
+  labs(
+    title    = "Grid 2: Multi-Metric Z-Score Heatmap (Windows)",
+    subtitle = "Blue = above average for that metric. Consistent blue across panels = robust parameter combination.",
+    x        = "SMA Window (days)",
+    y        = "Lookback Window (days)",
+    caption  = paste0("Signal threshold = ", best_sig, ", Magnitude threshold = ", best_mag, ". Training period only.")
+  )
+```
+
+### 9.5 Selected Parameters
+
+The Z-score heatmaps provide stronger evidence for the selected parameters than the 3D surfaces alone. In Grid 1, a broad blue band spanning signal threshold 0.020 to 0.050 appears consistently across Ann. Return, Calmar, Omega, Sharpe, and Sortino simultaneously. The selected sig=0.050 sits at the right edge of that band and mag=0.070 sits in the middle of the blue region across the magnitude axis. Five independent metrics pointing to the same parameter region confirms the edge is structural rather than an artifact of optimizing a single statistic. The one exception is Hit Rate, which favors very low signal thresholds where the strategy is invested nearly every day. This is expected and not a concern: high hit rate at low thresholds reflects a flatter, more active strategy, not a better one, and the tail-risk metrics correctly penalize that region. In Grid 2, the SMA window shows the clearest and most consistent signal: a blue band at SMA 15 to 25 runs across almost every metric panel, placing the selected SMA=23 firmly in a robust region. The lookback dimension is noisier and less decisive, which is the honest read: lookback at 50 days is a marginal improvement over the default 60, but the difference is small enough that the default would not have been a meaningful mistake.
+
+The final parameters are selected from the intersection of a high-Omega region and a Calmar Ratio above 0.10, which filters out combinations that inflate returns at the cost of large drawdowns. Parameters near the edge of the search range are treated with skepticism: a peak at the boundary suggests the optimum lies outside the grid and the apparent result may not generalize.
 
 ```{r opt-selected}
 #| message: false
@@ -2821,7 +2930,7 @@ final_params %>%
 
 The optimization is intentionally constrained. With only 11 ETFs and two clusters, the strategy has limited degrees of freedom, so over-fitting is a real risk on a 24-year training window. The Calmar filter is designed to penalize combinations that happen to catch a strong run while concealing a destructive drawdown. The goal is a parameter set that sits in a stable plateau on the surface, not a single sharp peak. A combination at the centre of a broad high-Omega region generalizes better than one at a narrow spike, even if the spike appears higher on the training surface.
 
-### 9.5 COVID Robustness Check
+### 9.6 COVID Robustness Check
 
 A legitimate concern with any optimization over the 2000-2024 training period is that the winning parameters may simply be those that happened to avoid the COVID crash of February to April 2020. That event produced the sharpest drawdown in the dataset and would disproportionately reward any parameter set that kept the strategy in cash during those months. To test whether the selected parameters are genuinely better or just COVID-lucky, the threshold grid is re-run with the COVID stress period excluded from performance measurement. If the same parameters win on both surfaces, the selection is robust. If different parameters win, the original result is partly an artifact of a single event.
 
@@ -2945,7 +3054,457 @@ The COVID robustness result is the strongest possible outcome: optimal parameter
 
 ## 10. Testing Period Results
 
-*\[Out-of-sample backtest, honest assessment.\]*
+The testing period runs from January 2025 to March 2026, approximately 15 months. All parameters are fixed at the values selected from the training optimization. No refitting occurs. The rolling cluster assignments are extended into the test period using the same beta-anchored algorithm applied during training, with each month-end cluster computed using only data available up to that point. The Kalman Filter and SMA are computed on the full cumulative return series running from training start through the test period, maintaining the causal forward-pass property. The strategy is re-initialized at \$1,000,000 at the start of the test period as a clean independent evaluation.
+
+```{r test-prep}
+#| message: false
+#| warning: false
+#| echo: false
+#| cache: true
+
+# Optimized parameters from Section 9
+OPT_SIG      <- if (nrow(best_g1) > 0) best_g1$sig_thresh[1]    else 0.010
+OPT_MAG      <- if (nrow(best_g1) > 0) best_g1$mag_thresh[1]    else 0.080
+OPT_LOOKBACK <- if (nrow(best_g2) > 0) best_g2$lookback_roll[1] else 60
+OPT_SMA      <- if (nrow(best_g2) > 0) best_g2$sma_window[1]    else 20
+
+sector_full <- returns %>% dplyr::filter(symbol %in% sector_tickers)
+spy_full    <- returns %>% dplyr::filter(symbol == "SPY")
+
+# ── Extend cluster_daily to full period using static assignments ─────────────
+cluster_daily_full <- returns %>%
+  dplyr::filter(symbol %in% sector_tickers) %>%
+  dplyr::left_join(
+    cluster_assignments_spy %>% dplyr::select(symbol, cluster),
+    by = "symbol"
+  ) %>%
+  dplyr::group_by(date, cluster) %>%
+  dplyr::summarise(cluster_ret = mean(ret, na.rm = TRUE), .groups = "drop") %>%
+  dplyr::mutate(cluster_label = dplyr::case_when(
+    cluster == cyclical_id  ~ "Cyclical",
+    cluster == defensive_id ~ "Defensive"
+  ))
+
+# ── KF + SMA on full cumulative return series ────────────────────────────────
+cluster_signals_full <- cluster_daily_full %>%
+  dplyr::group_by(cluster_label) %>%
+  dplyr::arrange(date) %>%
+  dplyr::mutate(
+    cum_ret  = cumsum(cluster_ret),
+    kf_level = apply_kf(cum_ret, dw_scale = KF_DW_SCALE),
+    sma_n    = TTR::SMA(cum_ret, n = OPT_SMA)
+  ) %>%
+  dplyr::ungroup()
+
+# ── Signals for full period with optimized thresholds ────────────────────────
+signal_full <- cluster_signals_full %>%
+  dplyr::filter(!is.na(sma_n)) %>%
+  dplyr::mutate(spread = sma_n - kf_level) %>%
+  dplyr::select(date, cluster_label, spread) %>%
+  tidyr::pivot_wider(names_from = cluster_label, values_from = spread) %>%
+  dplyr::arrange(date) %>%
+  dplyr::mutate(
+    stress_raw = (Cyclical < 0 & Defensive < 0) |
+                 abs(Cyclical) > OPT_MAG        |
+                 abs(Defensive) > OPT_MAG,
+    stress_confirmed = slider::slide_lgl(
+      stress_raw, ~all(.x), .before = STRESS_DAYS - 1, .complete = TRUE
+    ),
+    stress_confirmed = tidyr::replace_na(stress_confirmed, FALSE),
+    signal = dplyr::case_when(
+      stress_confirmed                                  ~ "Stress",
+      Cyclical  > OPT_SIG & Cyclical  >= Defensive     ~ "Momentum Cyclical",
+      Defensive > OPT_SIG & Defensive >  Cyclical      ~ "Momentum Defensive",
+      TRUE                                             ~ "No Signal"
+    )
+  )
+
+# ── Extend rolling clusters into test period ─────────────────────────────────
+month_ends_test <- sector_full %>%
+  dplyr::filter(symbol == "XLK", date >= TEST_START) %>%
+  dplyr::mutate(ym = lubridate::floor_date(date, "month")) %>%
+  dplyr::group_by(ym) %>%
+  dplyr::slice_max(date, n = 1) %>%
+  dplyr::ungroup() %>%
+  dplyr::pull(date)
+
+cluster_window_full <- function(end_date) {
+  ws   <- sector_full %>%
+    dplyr::filter(date <= end_date) %>%
+    dplyr::group_by(symbol) %>%
+    dplyr::slice_tail(n = OPT_LOOKBACK) %>%
+    dplyr::ungroup()
+  wspy <- spy_full %>%
+    dplyr::filter(date <= end_date) %>%
+    dplyr::slice_tail(n = OPT_LOOKBACK)
+
+  sc  <- sum(wspy$ret, na.rm = TRUE)
+  sv  <- var(wspy$ret, na.rm = TRUE)
+  smd <- max_dd(wspy$ret)
+
+  feats <- ws %>%
+    dplyr::group_by(symbol) %>%
+    dplyr::summarise(
+      excess_ret = sum(ret, na.rm = TRUE) - sc,
+      beta       = cov(ret, wspy$ret[seq_len(dplyr::n())],
+                       use = "complete.obs") / sv,
+      mdd_ratio  = max_dd(ret) / smd,
+      .groups    = "drop"
+    )
+
+  mat  <- scale(feats %>% dplyr::select(excess_ret, beta, mdd_ratio))
+  rownames(mat) <- feats$symbol
+  labs <- cutree(hclust(dist(mat, method = "euclidean"), method = "ward.D2"), k = 2)
+  mb   <- tapply(feats$beta, labs, mean)
+  cr   <- as.integer(names(which.max(mb)))
+
+  tibble::tibble(
+    date    = end_date,
+    symbol  = feats$symbol,
+    cluster = ifelse(labs == cr, "Cyclical", "Defensive")
+  )
+}
+
+rolling_test     <- purrr::map_dfr(month_ends_test, cluster_window_full)
+rolling_combined <- dplyr::bind_rows(rolling_spy, rolling_test)
+
+all_dates_full <- returns %>%
+  dplyr::filter(symbol == "XLK") %>%
+  dplyr::arrange(date) %>%
+  dplyr::select(date)
+
+rolling_filled_full <- tidyr::expand_grid(
+  date   = all_dates_full$date,
+  symbol = sector_tickers
+) %>%
+  dplyr::left_join(
+    rolling_combined %>% dplyr::select(date, symbol, cluster),
+    by = c("date", "symbol")
+  ) %>%
+  dplyr::arrange(symbol, date) %>%
+  dplyr::group_by(symbol) %>%
+  tidyr::fill(cluster, .direction = "down") %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(cluster = dplyr::if_else(cluster == "Cyclical", 1L, 0L))
+
+cluster_wide_test <- rolling_filled_full %>%
+  tidyr::pivot_wider(names_from  = symbol,
+                     values_from = cluster,
+                     names_prefix = "clust_")
+
+div_wide_full <- dividends_raw %>%
+  tidyr::pivot_wider(
+    names_from   = symbol,
+    values_from  = dividend,
+    names_prefix = "div_",
+    values_fill  = 0
+  )
+
+prices_wide_full <- raw %>%
+  dplyr::filter(symbol %in% sector_tickers) %>%
+  dplyr::select(symbol, date, open, close) %>%
+  tidyr::pivot_wider(
+    names_from  = symbol,
+    values_from = c(open, close),
+    names_glue  = "{symbol}_{.value}"
+  ) %>%
+  dplyr::arrange(date)
+
+loop_test <- prices_wide_full %>%
+  dplyr::left_join(div_wide_full,   by = "date") %>%
+  dplyr::left_join(cluster_wide_test, by = "date") %>%
+  dplyr::left_join(signal_full %>% dplyr::select(date, signal), by = "date") %>%
+  dplyr::arrange(date) %>%
+  dplyr::filter(!is.na(signal), date >= TEST_START) %>%
+  dplyr::mutate(dplyr::across(dplyr::starts_with("div_"),
+                               ~tidyr::replace_na(.x, 0)))
+```
+
+```{r test-execution-loop}
+#| message: false
+#| warning: false
+#| echo: false
+#| cache: true
+
+n_test     <- nrow(loop_test)
+pv_test_h  <- numeric(n_test)
+cash_test_h <- numeric(n_test)
+tc_test_h  <- numeric(n_test)
+sig_test_h <- character(n_test)
+w_test_h   <- matrix(0, nrow = n_test, ncol = length(sector_tickers),
+                      dimnames = list(NULL, sector_tickers))
+
+# Seed initial signal from last active state in training period
+last_train_sig <- signal_full %>%
+  dplyr::filter(date < as.Date(TEST_START), signal != "No Signal") %>%
+  dplyr::slice_tail(n = 1) %>%
+  dplyr::pull(signal)
+
+cur_cash   <- INITIAL_CAPITAL
+cur_shares <- setNames(rep(0, length(sector_tickers)), sector_tickers)
+pend_sig   <- if (length(last_train_sig) > 0) last_train_sig else NA_character_
+prev_pv    <- INITIAL_CAPITAL
+
+for (i in seq_len(n_test)) {
+  td  <- loop_test[i, ]
+  tds <- as.character(td$signal)
+
+  div_inc <- sum(sapply(sector_tickers, function(etf) {
+    dc <- paste0("div_", etf)
+    if (dc %in% names(td)) { dv <- td[[dc]]; if (!is.na(dv) && dv > 0) return(cur_shares[[etf]] * dv) }
+    0
+  }), na.rm = TRUE)
+  cur_cash <- cur_cash + div_inc
+
+  tc <- 0
+  if (!is.na(pend_sig) && pend_sig != "No Signal") {
+    alloc <- get_alloc(pend_sig)
+    ct <- setNames(sapply(sector_tickers, function(etf) {
+      col <- paste0("clust_", etf); if (col %in% names(td)) td[[col]] else NA_integer_
+    }), sector_tickers)
+    ac <- sector_tickers[!is.na(ct) & ct == 1 &
+            !is.na(sapply(sector_tickers, function(e) td[[paste0(e, "_open")]]))]
+    ad <- sector_tickers[!is.na(ct) & ct == 0 &
+            !is.na(sapply(sector_tickers, function(e) td[[paste0(e, "_open")]]))]
+    tw <- setNames(rep(0, length(sector_tickers)), sector_tickers)
+    if (length(ac) > 0) tw[ac] <- alloc$cyc / length(ac)
+    if (length(ad) > 0) tw[ad] <- alloc$def / length(ad)
+    tdols <- prev_pv * tw
+    ns    <- cur_shares
+    for (etf in sector_tickers) {
+      op <- td[[paste0(etf, "_open")]]; if (is.na(op) || op <= 0) next
+      ns[[etf]]  <- tdols[[etf]] / op
+      dlt        <- ns[[etf]] - cur_shares[[etf]]
+      cur_cash   <- cur_cash - dlt * op
+      tc         <- tc + abs(dlt * op) * TC_RATE
+    }
+    cur_cash   <- cur_cash - tc
+    cur_shares <- ns
+  }
+
+  eq <- sum(sapply(sector_tickers, function(etf) {
+    cp <- td[[paste0(etf, "_close")]]; if (!is.na(cp) && cp > 0) cur_shares[[etf]] * cp else 0
+  }), na.rm = TRUE)
+
+  pv <- eq + cur_cash
+  pv_test_h[i]  <- pv
+  cash_test_h[i] <- cur_cash
+  tc_test_h[i]  <- tc
+  sig_test_h[i] <- tds
+
+  if (pv > 0) {
+    for (etf in sector_tickers) {
+      cp <- td[[paste0(etf, "_close")]]
+      if (!is.na(cp) && cp > 0)
+        w_test_h[i, etf] <- (cur_shares[[etf]] * cp) / pv
+    }
+  }
+
+  ps       <- if (i == 1) NA_character_ else sig_test_h[i - 1]
+  pend_sig <- dplyr::case_when(
+    is.na(ps)  & tds != "No Signal"             ~ tds,
+    !is.na(ps) & tds != ps & tds != "No Signal" ~ tds,
+    TRUE                                         ~ NA_character_
+  )
+  prev_pv <- pv
+}
+
+test_results <- loop_test %>%
+  dplyr::select(date) %>%
+  dplyr::mutate(
+    portfolio_value = pv_test_h,
+    cash            = cash_test_h,
+    tc              = tc_test_h,
+    signal          = sig_test_h
+  )
+
+test_strat_r <- diff(test_results$portfolio_value) / head(test_results$portfolio_value, -1)
+test_strat_r <- test_strat_r[is.finite(test_strat_r)]
+```
+
+### 10.1 Strategy vs SPY Equity Curve
+
+```{r test-equity-curve}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-width: 10
+#| fig-height: 5
+
+spy_test_bench <- raw %>%
+  dplyr::filter(symbol == "SPY", date >= TEST_START) %>%
+  dplyr::select(date, spy_adj = adjusted) %>%
+  dplyr::arrange(date) %>%
+  dplyr::mutate(
+    spy_ret   = spy_adj / dplyr::lag(spy_adj) - 1,
+    spy_value = INITIAL_CAPITAL * (spy_adj / dplyr::first(spy_adj))
+  )
+
+test_spy_r <- spy_test_bench$spy_ret[!is.na(spy_test_bench$spy_ret)]
+
+# Equal-weight sector ETF benchmark: compute returns within each symbol, then average by date
+ew_bench <- raw %>%
+  dplyr::filter(symbol %in% sector_tickers, date >= TEST_START) %>%
+  dplyr::group_by(symbol) %>%
+  dplyr::arrange(date) %>%
+  dplyr::mutate(ret = adjusted / dplyr::lag(adjusted) - 1) %>%
+  dplyr::ungroup() %>%
+  dplyr::group_by(date) %>%
+  dplyr::summarise(ew_ret = mean(ret, na.rm = TRUE), .groups = "drop") %>%
+  dplyr::arrange(date) %>%
+  dplyr::mutate(
+    ew_ret   = dplyr::if_else(is.nan(ew_ret), 0, ew_ret),
+    ew_value = INITIAL_CAPITAL * cumprod(1 + ew_ret)
+  )
+
+test_ew_r <- ew_bench$ew_ret
+
+# XLK benchmark
+xlk_bench <- raw %>%
+  dplyr::filter(symbol == "XLK", date >= TEST_START) %>%
+  dplyr::select(date, xlk_adj = adjusted) %>%
+  dplyr::arrange(date) %>%
+  dplyr::mutate(
+    xlk_ret   = xlk_adj / dplyr::lag(xlk_adj) - 1,
+    xlk_value = INITIAL_CAPITAL * (xlk_adj / dplyr::first(xlk_adj))
+  )
+
+test_xlk_r <- xlk_bench$xlk_ret[!is.na(xlk_bench$xlk_ret)]
+
+combined_test <- test_results %>%
+  dplyr::left_join(spy_test_bench %>% dplyr::select(date, spy_value),  by = "date") %>%
+  dplyr::left_join(ew_bench       %>% dplyr::select(date, ew_value),   by = "date") %>%
+  dplyr::left_join(xlk_bench      %>% dplyr::select(date, xlk_value),  by = "date") %>%
+  dplyr::mutate(
+    strat_idx  = portfolio_value / dplyr::first(portfolio_value) * 100,
+    spy_idx    = spy_value  / dplyr::first(spy_value)  * 100,
+    ew_idx     = ew_value   / dplyr::first(ew_value)   * 100,
+    xlk_idx    = xlk_value  / dplyr::first(xlk_value)  * 100,
+    strat_peak = cummax(portfolio_value),
+    spy_peak   = cummax(spy_value),
+    strat_dd   = (portfolio_value - strat_peak) / strat_peak,
+    spy_dd     = (spy_value - spy_peak) / spy_peak
+  )
+
+combined_test %>%
+  dplyr::select(date,
+                Strategy       = strat_idx,
+                SPY            = spy_idx,
+                `Equal-Weight` = ew_idx,
+                XLK            = xlk_idx) %>%
+  tidyr::pivot_longer(-date, names_to = "series", values_to = "value") %>%
+  ggplot(aes(x = date, y = value, colour = series, linewidth = series)) +
+  geom_line(alpha = 0.9) +
+  scale_colour_manual(values = c(
+    "Strategy"     = "#2c7bb6",
+    "SPY"          = "#d7191c",
+    "Equal-Weight" = "#1a9641",
+    "XLK"          = "#f4a736"
+  )) +
+  scale_linewidth_manual(values = c(
+    "Strategy"     = 1.0,
+    "SPY"          = 0.6,
+    "Equal-Weight" = 0.6,
+    "XLK"          = 0.6
+  )) +
+  labs(
+    title    = "Testing Period: Strategy vs Benchmarks (Indexed to 100)",
+    subtitle = "January 2025 to March 2026. Optimized parameters applied. No refitting.",
+    x        = NULL, y = "Index (100 = start)", colour = NULL, linewidth = NULL,
+    caption  = "Equal-Weight = buy-and-hold equal allocation across all 11 sector ETFs. XLK = Technology ETF."
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "bottom")
+```
+
+### 10.2 Drawdown Comparison
+
+```{r test-drawdown}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-width: 10
+#| fig-height: 4
+
+combined_test %>%
+  dplyr::select(date, Strategy = strat_dd, SPY = spy_dd) %>%
+  tidyr::pivot_longer(-date, names_to = "series", values_to = "dd") %>%
+  ggplot(aes(x = date, y = dd * 100, colour = series, fill = series)) +
+  geom_ribbon(aes(ymin = dd * 100, ymax = 0), alpha = 0.2) +
+  geom_line(linewidth = 0.6) +
+  scale_colour_manual(values = c("Strategy" = "#2c7bb6", "SPY" = "#d7191c")) +
+  scale_fill_manual(values   = c("Strategy" = "#2c7bb6", "SPY" = "#d7191c")) +
+  labs(
+    title    = "Testing Period: Drawdown Comparison",
+    subtitle = "Drawdown from rolling peak. January 2025 to March 2026.",
+    x        = NULL, y = "Drawdown (%)", colour = NULL, fill = NULL,
+    caption  = "Testing period only. Parameters fixed from training optimization."
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "bottom")
+```
+
+### 10.3 Performance Metrics
+
+```{r test-performance-table}
+#| message: false
+#| warning: false
+#| echo: false
+
+bench_metrics <- function(r, start_val, end_val) {
+  c(
+    round((end_val / start_val - 1) * 100, 2),
+    round(ann_ret(r) * 100, 2),
+    round(mean(r, na.rm = TRUE) / sd(r, na.rm = TRUE) * sqrt(252), 3),
+    round(omega_ratio(r), 3),
+    round(mean(r[r > 0], na.rm = TRUE) /
+            abs(mean(r[r < 0], na.rm = TRUE)) * sqrt(252), 3),
+    round(max_dd(r) * 100, 2),
+    round(calmar(r), 3),
+    round(mean(r > 0, na.rm = TRUE) * 100, 2)
+  )
+}
+
+tibble::tibble(
+  Metric = c("Total Return (%)", "Annualised Return (%)", "Sharpe Ratio",
+             "Omega Ratio", "Sortino Ratio", "Max Drawdown (%)",
+             "Calmar Ratio", "Hit Rate (%)"),
+  Strategy = bench_metrics(
+    test_strat_r,
+    INITIAL_CAPITAL,
+    dplyr::last(test_results$portfolio_value)
+  ),
+  SPY = bench_metrics(
+    test_spy_r,
+    INITIAL_CAPITAL,
+    dplyr::last(spy_test_bench$spy_value)
+  ),
+  `Equal-Weight` = bench_metrics(
+    test_ew_r,
+    INITIAL_CAPITAL,
+    dplyr::last(ew_bench$ew_value)
+  ),
+  XLK = bench_metrics(
+    test_xlk_r,
+    INITIAL_CAPITAL,
+    dplyr::last(xlk_bench$xlk_value)
+  )
+) %>%
+  gt::gt() %>%
+  gt::tab_header(
+    title    = "Testing Period Performance: Strategy vs Benchmarks",
+    subtitle = "January 2025 to March 2026. Optimized parameters. No refitting."
+  ) %>%
+  gt::tab_style(
+    style     = gt::cell_text(weight = "bold"),
+    locations = gt::cells_column_labels()
+  ) %>%
+  gt::tab_style(
+    style     = gt::cell_fill(color = "#f0f4ff"),
+    locations = gt::cells_body(columns = Strategy)
+  ) %>%
+  gt::tab_source_note("Equal-Weight = daily equal-weight average of all 11 sector ETFs. XLK = Technology ETF only. Sharpe/Sortino annualised using sqrt(252).")
+```
 
 ------------------------------------------------------------------------
 
