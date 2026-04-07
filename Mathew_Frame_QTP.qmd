@@ -1,13 +1,21 @@
 ---
 title: "Cluster-Based Relative Value Strategy: Intra-Cluster Mean Reversion on SPDR Sector ETFs"
 author: "Mathew Frame"
-date: "07/04/2026"
+date: "2026-04-07"
 format:
   html:
-    embed-resources: true
+    theme: cosmo
     toc: true
     toc-depth: 3
-    theme: cosmo
+    embed-resources: true
+    code-fold: true
+    code-summary: "Show Code"
+    code-copy: true
+execute:
+  cache: true
+  freeze: auto
+  warning: false
+  message: false
 ---
 
 ```{r setup}
@@ -235,7 +243,342 @@ Despite my initial hypothesis being k = 4, **the elbow I see is at k = 3.** Ther
 
 ### 3.3 Hierarchical Clustering
 
-*\[To be built after k is confirmed from elbow method above.\]*
+```{r hierarchical-clustering}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-width: 9
+#| fig-height: 5
+
+K <- 3
+
+# Map tickers to readable sector names
+name_map <- c(
+  XLB  = "Materials",       XLC  = "Communications",  XLE  = "Energy",
+  XLF  = "Financials",      XLI  = "Industrials",     XLK  = "Technology",
+  XLP  = "Consumer Staples", XLRE = "Real Estate",    XLV  = "Health Care",
+  XLU  = "Utilities",       XLY  = "Consumer Disc."
+)
+
+hc_named         <- hc
+hc_named$labels  <- name_map[hc$labels]
+
+cluster_colors <- c("#2c7bb6", "#1a9641", "#d7191c")
+
+factoextra::fviz_dend(
+  hc_named,
+  k                 = K,
+  k_colors          = cluster_colors,
+  color_labels_by_k = TRUE,
+  rect              = TRUE,
+  rect_fill         = TRUE,
+  horiz             = TRUE,
+  main              = "Hierarchical Clustering of Sector ETFs (Ward.D2, k = 3)",
+  xlab              = "Height",
+  ylab              = "",
+  ggtheme           = theme_minimal(base_size = 11),
+  labels_track_height = 0.8
+) +
+  labs(caption = "Distance: d(i,j) = 1 - corr(i,j). Training period June 2000 to December 2024.")
+```
+
+```{r cluster-membership}
+#| message: false
+#| warning: false
+#| echo: false
+
+cluster_assignments <- tibble::tibble(
+  symbol  = names(cutree(hc, k = K)),
+  cluster = cutree(hc, k = K)
+) %>%
+  dplyr::arrange(cluster, symbol)
+
+# Silhouette score
+sil       <- cluster::silhouette(cutree(hc, k = K), dist_mat)
+avg_sil   <- round(mean(sil[, 3]), 3)
+
+cluster_assignments %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::summarise(
+    `ETFs`            = paste(symbol, collapse = ", "),
+    `Size`            = dplyr::n(),
+    .groups           = "drop"
+  ) %>%
+  dplyr::rename(Cluster = cluster) %>%
+  gt::gt() %>%
+  gt::tab_header(
+    title    = "Cluster Assignments at k = 3",
+    subtitle = paste0("Average silhouette width: ", avg_sil, "  (> 0.25 indicates meaningful structure)")
+  ) %>%
+  gt::tab_style(
+    style     = gt::cell_text(weight = "bold"),
+    locations = gt::cells_column_labels()
+  ) %>%
+  gt::tab_source_note("Assignments derived from full training period average correlation matrix.")
+```
+
+The dendrogram reveals which ETFs the algorithm groups together based on 24 years of rolling return correlations. ETFs that merge at low linkage distances are tightly co-moving; those that merge late are structurally more distinct. The red cut line at k = 3 produces three groups consistent with the prior hypothesis, with the commodity and rate-sensitive hypothesized clusters likely consolidating into one given their shared sensitivity to macro conditions. The average silhouette width quantifies cluster separation: values above 0.25 indicate the groupings are non-arbitrary, and values above 0.50 indicate strong structure. A low silhouette score here is a signal to revisit k before proceeding.
+
+```{r sil-plot-k3}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-width: 8
+#| fig-height: 4
+
+p_sil3 <- factoextra::fviz_silhouette(sil, print.summary = FALSE) +
+  labs(title = paste0("k = 3  |  avg sil = ", avg_sil), x = NULL, y = "Silhouette Width") +
+  theme_minimal(base_size = 9) +
+  theme(legend.position = "none")
+```
+
+### 3.4 Revisiting k: Testing k = 4
+
+The silhouette width of 0.221 at k = 3 falls below the 0.25 threshold for meaningful cluster separation. The dendrogram suggests Energy is the likely culprit: it merges into the red cluster at the highest linkage distance, indicating it is structurally distinct from Industrials, Materials, and Financials but forced into the same group at k = 3. Splitting to k = 4 isolates Energy and tests whether cluster separation improves enough to justify the additional complexity and potential transaction costs from more frequent cluster reassignment.
+
+```{r k4-test}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-width: 9
+#| fig-height: 5
+
+K4 <- 4
+
+hc_named4        <- hc
+hc_named4$labels <- name_map[hc$labels]
+
+factoextra::fviz_dend(
+  hc_named4,
+  k                 = K4,
+  k_colors          = c("#2c7bb6", "#1a9641", "#d7191c", "#f4a736"),
+  color_labels_by_k = TRUE,
+  rect              = TRUE,
+  rect_fill         = TRUE,
+  horiz             = TRUE,
+  main              = "Hierarchical Clustering of Sector ETFs (Ward.D2, k = 4)",
+  xlab              = "Height",
+  ylab              = "",
+  ggtheme           = theme_minimal(base_size = 11),
+  labels_track_height = 0.8
+) +
+  labs(caption = "Distance: d(i,j) = 1 - corr(i,j). Training period June 2000 to December 2024.")
+```
+
+```{r k4-silhouette}
+#| message: false
+#| warning: false
+#| echo: false
+
+sil4     <- cluster::silhouette(cutree(hc, k = K4), dist_mat)
+avg_sil4 <- round(mean(sil4[, 3]), 3)
+
+cluster_assignments4 <- tibble::tibble(
+  symbol  = names(cutree(hc, k = K4)),
+  cluster = cutree(hc, k = K4)
+) %>%
+  dplyr::arrange(cluster, symbol)
+
+cluster_assignments4 %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::summarise(
+    ETFs = paste(symbol, collapse = ", "),
+    Size = dplyr::n(),
+    .groups = "drop"
+  ) %>%
+  dplyr::rename(Cluster = cluster) %>%
+  gt::gt() %>%
+  gt::tab_header(
+    title    = "Cluster Assignments at k = 4",
+    subtitle = paste0("Average silhouette width: ", avg_sil4, "  (> 0.25 indicates meaningful structure)")
+  ) %>%
+  gt::tab_style(
+    style     = gt::cell_text(weight = "bold"),
+    locations = gt::cells_column_labels()
+  ) %>%
+  gt::tab_source_note("Assignments derived from full training period average correlation matrix.")
+```
+
+```{r sil-plot-k4}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-width: 8
+#| fig-height: 4
+
+p_sil4 <- factoextra::fviz_silhouette(sil4, print.summary = FALSE) +
+  labs(title = paste0("k = 4  |  avg sil = ", avg_sil4), x = NULL, y = "Silhouette Width") +
+  theme_minimal(base_size = 9) +
+  theme(legend.position = "none")
+```
+
+*\[Review both silhouette plots and confirm final k before proceeding to Section 4.\]*
+
+### 3.5 Revisiting k: Testing k = 5
+
+At k = 4, Real Estate and Utilities split off before Energy, which remains grouped with Industrials, Materials, and Financials. The silhouette plot reveals that these two small clusters (size 2 each) are the least well-separated. Testing k = 5 allows Energy to isolate into its own cluster, which is the structural behavior suggested by the dendrogram throughout -- Energy consistently merges last at the highest linkage distance, indicating its commodity-driven return profile is genuinely distinct from all other sectors.
+
+```{r k5-test}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-width: 9
+#| fig-height: 5
+
+K5 <- 5
+
+hc_named5        <- hc
+hc_named5$labels <- name_map[hc$labels]
+
+factoextra::fviz_dend(
+  hc_named5,
+  k                   = K5,
+  k_colors            = c("#2c7bb6", "#1a9641", "#d7191c", "#f4a736", "#984ea3"),
+  color_labels_by_k   = TRUE,
+  rect                = TRUE,
+  rect_fill           = TRUE,
+  horiz               = TRUE,
+  main                = "Hierarchical Clustering of Sector ETFs (Ward.D2, k = 5)",
+  xlab                = "Height",
+  ylab                = "",
+  ggtheme             = theme_minimal(base_size = 11),
+  labels_track_height = 0.8
+) +
+  labs(caption = "Distance: d(i,j) = 1 - corr(i,j). Training period June 2000 to December 2024.")
+```
+
+```{r k5-silhouette}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-width: 8
+#| fig-height: 4
+
+K5         <- 5
+sil5       <- cluster::silhouette(cutree(hc, k = K5), dist_mat)
+avg_sil5   <- round(mean(sil5[, 3]), 3)
+
+cluster_assignments5 <- tibble::tibble(
+  symbol  = names(cutree(hc, k = K5)),
+  cluster = cutree(hc, k = K5)
+) %>%
+  dplyr::arrange(cluster, symbol)
+
+cluster_assignments5 %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::summarise(
+    ETFs = paste(symbol, collapse = ", "),
+    Size = dplyr::n(),
+    .groups = "drop"
+  ) %>%
+  dplyr::rename(Cluster = cluster) %>%
+  gt::gt() %>%
+  gt::tab_header(
+    title    = "Cluster Assignments at k = 5",
+    subtitle = paste0("Average silhouette width: ", avg_sil5, "  (> 0.50 indicates reasonable structure)")
+  ) %>%
+  gt::tab_style(
+    style     = gt::cell_text(weight = "bold"),
+    locations = gt::cells_column_labels()
+  ) %>%
+  gt::tab_source_note("Assignments derived from full training period average correlation matrix.")
+
+p_sil5 <- factoextra::fviz_silhouette(sil5, print.summary = FALSE) +
+  labs(title = paste0("k = 5  |  avg sil = ", avg_sil5), x = NULL, y = "Silhouette Width") +
+  theme_minimal(base_size = 9) +
+  theme(legend.position = "none")
+```
+
+### 3.6 Revisiting k: Testing k = 6
+
+```{r k6-test}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-width: 9
+#| fig-height: 5
+
+K6 <- 6
+
+hc_named6        <- hc
+hc_named6$labels <- name_map[hc$labels]
+
+factoextra::fviz_dend(
+  hc_named6,
+  k                   = K6,
+  k_colors            = c("#2c7bb6", "#1a9641", "#d7191c", "#f4a736", "#984ea3", "#e41a1c"),
+  color_labels_by_k   = TRUE,
+  rect                = TRUE,
+  rect_fill           = TRUE,
+  horiz               = TRUE,
+  main                = "Hierarchical Clustering of Sector ETFs (Ward.D2, k = 6)",
+  xlab                = "Height",
+  ylab                = "",
+  ggtheme             = theme_minimal(base_size = 11),
+  labels_track_height = 0.8
+) +
+  labs(caption = "Distance: d(i,j) = 1 - corr(i,j). Training period June 2000 to December 2024.")
+```
+
+```{r k6-silhouette}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-width: 8
+#| fig-height: 4
+
+sil6     <- cluster::silhouette(cutree(hc, k = K6), dist_mat)
+avg_sil6 <- round(mean(sil6[, 3]), 3)
+
+cluster_assignments6 <- tibble::tibble(
+  symbol  = names(cutree(hc, k = K6)),
+  cluster = cutree(hc, k = K6)
+) %>%
+  dplyr::arrange(cluster, symbol)
+
+cluster_assignments6 %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::summarise(
+    ETFs = paste(symbol, collapse = ", "),
+    Size = dplyr::n(),
+    .groups = "drop"
+  ) %>%
+  dplyr::rename(Cluster = cluster) %>%
+  gt::gt() %>%
+  gt::tab_header(
+    title    = "Cluster Assignments at k = 6",
+    subtitle = paste0("Average silhouette width: ", avg_sil6, "  (> 0.50 indicates reasonable structure)")
+  ) %>%
+  gt::tab_style(
+    style     = gt::cell_text(weight = "bold"),
+    locations = gt::cells_column_labels()
+  ) %>%
+  gt::tab_source_note("Assignments derived from full training period average correlation matrix.")
+
+p_sil6 <- factoextra::fviz_silhouette(sil6, print.summary = FALSE) +
+  labs(title = paste0("k = 6  |  avg sil = ", avg_sil6), x = NULL, y = "Silhouette Width") +
+  theme_minimal(base_size = 9) +
+  theme(legend.position = "none")
+```
+
+### 3.7 Silhouette Comparison: k = 3 to 6
+
+```{r sil-comparison}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-width: 10
+#| fig-height: 7
+
+(p_sil3 | p_sil4) / (p_sil5 | p_sil6) +
+  patchwork::plot_annotation(
+    title   = "Silhouette Width Comparison Across k",
+    subtitle = "Higher and more uniform bars = better cluster separation. Dashed line = cluster average.",
+    caption  = "Training period June 2000 to December 2024. Ward.D2 hierarchical clustering."
+  )
+```
+
+*\[Review and confirm final k before proceeding to Section 4.\]*
 
 ------------------------------------------------------------------------
 
