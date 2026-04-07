@@ -1354,6 +1354,52 @@ Third, overall window-to-window stability is 77.3%, compared to the near-random 
 
 ------------------------------------------------------------------------
 
+### 3.4 Strategy Architecture
+
+The complete daily decision process is summarized in the diagram below.
+
+```{mermaid}
+%%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#e0e0e0', 'primaryTextColor': '#0d1b2a', 'primaryBorderColor': '#555', 'lineColor': '#555', 'secondaryColor': '#fff2cc', 'tertiaryColor': '#ffffff'}}}%%
+flowchart TD
+    classDef startend fill:#cce5ff,stroke:#003366,stroke-width:1px;
+    classDef process fill:#e0e0e0,stroke:#555,stroke-width:1px;
+    classDef decision fill:#fff2cc,stroke:#777,stroke-width:1px;
+    classDef stress fill:#fff2cc,stroke:#777,stroke-width:1px;
+    classDef momentum fill:#ccffcc,stroke:#777,stroke-width:1px;
+    classDef nosignal fill:#e0e0e0,stroke:#555,stroke-width:1px;
+
+    A([Daily Close]):::startend
+    B["Monthly Rebalance<br/>Cluster ETFs: Defensive / Cyclical<br/>via SPY-relative features"]:::process
+    C["Daily: Equal-weighted cumulative<br/>return series per cluster"]:::process
+    D["Kalman Filter per cluster<br/>Extract adaptive long-run level"]:::process
+    E["20d SMA minus Kalman level<br/>= Momentum Spread per cluster"]:::process
+    F{"Both clusters below<br/>Kalman level?<br/>(Market Stress)"}:::decision
+    G["STRESS STATE<br/>10% Cyclical / 30% Defensive<br/>60% Cash"]:::stress
+    H{"Cyclical spread minus<br/>Defensive spread<br/>> threshold?"}:::decision
+    I["MOMENTUM CYCLICAL<br/>80% Cyclical / 20% Defensive"]:::momentum
+    J{"Defensive spread minus<br/>Cyclical spread<br/>> threshold?"}:::decision
+    K["MOMENTUM DEFENSIVE<br/>20% Cyclical / 80% Defensive"]:::stress
+    L["NO SIGNAL<br/>Hold previous allocation"]:::nosignal
+    M["Equal-weight ETFs<br/>within each cluster"]:::process
+    N["Transaction costs: 0.05%<br/>per unit weight change"]:::process
+    O([Execute at Open T+1]):::startend
+
+    A --> B --> C --> D --> E --> F
+    F -->|Yes| G
+    F -->|No| H
+    H -->|Yes| I
+    H -->|No| J
+    J -->|Yes| K
+    J -->|No| L
+    G --> M
+    I --> M
+    K --> M
+    L --> M
+    M --> N --> O
+```
+
+------------------------------------------------------------------------
+
 ## 4. Kalman Filter
 
 *\[Local level model, smoothed price and slope, hard gate rule, visualization, gate firing frequency.\]*
