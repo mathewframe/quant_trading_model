@@ -1,0 +1,139 @@
+---
+title: "Cluster-Based Relative Value Strategy: Intra-Cluster Mean Reversion on SPDR Sector ETFs"
+author: "Mathew Frame"
+date: "07/04/2026"
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 3
+    theme: cosmo
+---
+
+```{r setup}
+#| message: false
+#| warning: false
+#| echo: false
+
+library(tidyverse)
+library(tidyquant)
+library(gt)
+library(cluster)
+library(dlm)
+library(ggrepel)
+library(scales)
+library(PerformanceAnalytics)
+library(factoextra)
+library(ggdendro)
+library(patchwork)
+library(plotly)
+library(foreach)
+library(doParallel)
+library(RTL)
+```
+
+```{r data-pull}
+#| message: false
+#| warning: false
+#| echo: false
+
+tickers <- c("SPY", "XLB", "XLC", "XLE", "XLF", "XLI",
+             "XLK", "XLP", "XLRE", "XLV", "XLU", "XLY")
+
+raw <- tidyquant::tq_get(tickers, from = "2000-06-01", to = "2026-03-31")
+
+# Log returns grouped by symbol
+returns <- raw %>%
+  dplyr::group_by(symbol) %>%
+  dplyr::arrange(date) %>%
+  dplyr::mutate(ret = log(adjusted / dplyr::lag(adjusted))) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(!is.na(ret))
+
+# Training / testing split -- date filter only, never slice()
+TRAIN_END  <- "2024-12-31"
+TEST_START <- "2025-01-01"
+
+ret_train <- returns %>% dplyr::filter(date <= TRAIN_END)
+ret_test  <- returns %>% dplyr::filter(date >= TEST_START)
+
+# Sector ETFs only (SPY is benchmark, not traded)
+sector_tickers <- tickers[tickers != "SPY"]
+
+sector_train <- ret_train %>% dplyr::filter(symbol %in% sector_tickers)
+sector_test  <- ret_test  %>% dplyr::filter(symbol %in% sector_tickers)
+spy_train    <- ret_train %>% dplyr::filter(symbol == "SPY")
+spy_test     <- ret_test  %>% dplyr::filter(symbol == "SPY")
+```
+
+------------------------------------------------------------------------
+
+## Executive Summary
+
+*\[To be written last. 3 sentences: strategy thesis, training result, testing result.\]*
+
+------------------------------------------------------------------------
+
+## 1. Intuitive Rationale
+
+*\[Strategy thesis, clustering rationale, failure conditions, paper citations.\]*
+
+------------------------------------------------------------------------
+
+## 2. Data and Features
+
+*\[Data sources table, log return justification, rolling correlation matrix as clustering input.\]*
+
+------------------------------------------------------------------------
+
+## 3. Clustering
+
+*\[Elbow method to select k, hierarchical clustering on distance matrix, silhouette validation, cluster visualization, commercial interpretation.\]*
+
+------------------------------------------------------------------------
+
+## 4. Kalman Filter
+
+*\[Local level model, smoothed price and slope, hard gate rule, visualization, gate firing frequency.\]*
+
+------------------------------------------------------------------------
+
+## 5. Signal Generation
+
+*\[Within-cluster z-scores, inverse rank weighting, cross-cluster equal weight, worked example.\]*
+
+------------------------------------------------------------------------
+
+## 6. Execution and Implementation
+
+*\[Mermaid mental model, execution rules, signal lag, transaction costs, position sizing.\]*
+
+------------------------------------------------------------------------
+
+## 7. Training Period Backtest
+
+*\[Equity curve vs SPY, drawdown chart, performance table.\]*
+
+------------------------------------------------------------------------
+
+## 8. Risk Appetite
+
+*\[Max drawdown tolerance, optimization objective, defensive trigger.\]*
+
+------------------------------------------------------------------------
+
+## 9. Optimization
+
+*\[Grid search over parameters, heat map, selected parameters.\]*
+
+------------------------------------------------------------------------
+
+## 10. Testing Period Results
+
+*\[Out-of-sample backtest, honest assessment.\]*
+
+------------------------------------------------------------------------
+
+## 11. Lessons Learned
+
+*\[Min 5 points x 3-5 sentences, FIN 440 QTP failures referenced.\]*
