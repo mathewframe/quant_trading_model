@@ -100,7 +100,43 @@ Two papers motivate the design. Ajayi (2025) demonstrates that unsupervised K-Me
 
 ## 2. Data and Features
 
-*\[Data sources table, log return justification, rolling correlation matrix as clustering input.\]*
+```{r data-sources-table}
+#| message: false
+#| warning: false
+#| echo: false
+
+tibble::tibble(
+  Ticker      = c("SPY", "XLB", "XLC", "XLE", "XLF", "XLI",
+                  "XLK", "XLP", "XLRE", "XLV", "XLU", "XLY"),
+  Name        = c("SPDR S&P 500 ETF Trust", "Materials", "Communication Services",
+                  "Energy", "Financials", "Industrials", "Technology",
+                  "Consumer Staples", "Real Estate", "Health Care",
+                  "Utilities", "Consumer Discretionary"),
+  Role        = c("Benchmark", rep("Traded", 11)),
+  `Available From` = c("2000-06-01", "2000-06-01", "2018-06-19", "2000-06-01",
+                        "2000-06-01", "2000-06-01", "2000-06-01", "2000-06-01",
+                        "2015-10-08", "2000-06-01", "2000-06-01", "2000-06-01"),
+  Source      = rep("Yahoo Finance via tidyquant::tq_get()", 12)
+) %>%
+  gt::gt() %>%
+  gt::tab_header(
+    title    = "Universe: SPDR Sector ETFs and Benchmark",
+    subtitle = "Daily adjusted close prices. Training: June 2000 to December 2024. Testing: January 2025 to March 2026."
+  ) %>%
+  gt::tab_style(
+    style     = gt::cell_fill(color = "#f0f4ff"),
+    locations = gt::cells_body(rows = Role == "Benchmark")
+  ) %>%
+  gt::tab_style(
+    style     = gt::cell_text(weight = "bold"),
+    locations = gt::cells_body(columns = Ticker)
+  ) %>%
+  gt::tab_source_note("XLC available from June 2018; XLRE available from October 2015. Both included despite shorter histories.")
+```
+
+All price data is sourced via API with no local files. Log returns are computed as $r_t = \log(P_t / P_{t-1})$ on adjusted close prices, which account for dividends and splits. Log returns are used rather than simple returns because they are additive across time, approximately normally distributed, and produce a more stable correlation matrix, which is the direct input to the clustering algorithm. SPY is carried as the benchmark throughout but is never included in the traded universe or the clustering.
+
+The clustering input is not the raw return series but the pairwise correlation matrix computed over a rolling 60-day window. Clustering directly on returns would group ETFs by recent absolute performance, crowding recent winners into one cluster regardless of whether they share underlying economic drivers. Correlation captures co-movement independent of magnitude: two ETFs are similar if they move in the same direction at the same time, not because they both went up. The 60-day window is a deliberate balance between responsiveness and stability. A shorter window (20 days) produces noisy correlations dominated by single events; a longer window (252 days) is too slow to reflect structural shifts in market relationships and would keep the portfolio anchored to stale cluster assignments. The 60-day parameter is treated as tunable and will be evaluated in the optimization section.
 
 ------------------------------------------------------------------------
 
