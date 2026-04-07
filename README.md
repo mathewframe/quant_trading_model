@@ -21,7 +21,7 @@ The strategy classifies ETFs into **Cyclical** and **Defensive** clusters using 
 | File | Description |
 |------|-------------|
 | `Mathew_Frame_QTP.qmd` | Main Quarto document — all analysis, code, and commentary |
-| `Mathew_Frame_QTP.html` | Self-contained rendered HTML (submit this) |
+| `Mathew_Frame_QTP.html` | Self-contained rendered HTML |
 | `context.md` | Project context and CLAUDE.md instructions |
 | `CLAUDE.md` | AI assistant context file |
 
