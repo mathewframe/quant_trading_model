@@ -12,6 +12,8 @@
 **Requirement:** Clustering as primary signal driver + Kalman Filter integration
 **GitHub:** Public repo, daily commits showing work progression (5-pt penalty for missing)
 
+**HARD RULE — R ONLY:** All analysis must be done in R inside the Quarto document. Any Python scripts or structure will be penalized. This applies to every tool call, every code suggestion, and every example. Never suggest Python. Never write Python. R and tidyverse only.
+
 ---
 
 ## SECTION 2: RUBRIC PRIORITIES (from grading sheet, /20)

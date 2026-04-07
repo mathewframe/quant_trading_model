@@ -106,6 +106,9 @@ Two papers motivate the design. Ajayi (2025) demonstrates that unsupervised K-Me
 
 ------------------------------------------------------------------------
 
+::: {.callout-note collapse="true"}
+## Pre-Pivot Analysis
+
 ## 2. Data and Features
 
 ```{r data-sources-table}
@@ -579,6 +582,402 @@ p_sil6 <- factoextra::fviz_silhouette(sil6, print.summary = FALSE) +
 ```
 
 *\[Review and confirm final k before proceeding to Section 4.\]*
+
+### 3.8 Cluster Stability Over Time
+
+```{r rolling-cluster-stability}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-width: 11
+#| fig-height: 5
+
+K_USE <- 3
+LOOKBACK <- 60
+
+# Month-end dates with at least LOOKBACK trading days of history
+all_dates <- sector_train %>%
+  dplyr::filter(symbol == "XLK") %>%
+  dplyr::arrange(date) %>%
+  dplyr::pull(date)
+
+month_ends <- sector_train %>%
+  dplyr::filter(symbol == "XLK") %>%
+  dplyr::mutate(ym = lubridate::floor_date(date, "month")) %>%
+  dplyr::group_by(ym) %>%
+  dplyr::slice_max(date, n = 1) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(date >= all_dates[LOOKBACK]) %>%
+  dplyr::pull(date)
+
+# Compute raw cluster assignments for one window
+cluster_one_window <- function(end_date) {
+  window <- sector_train %>%
+    dplyr::filter(date <= end_date) %>%
+    dplyr::group_by(symbol) %>%
+    dplyr::slice_tail(n = LOOKBACK) %>%
+    dplyr::ungroup() %>%
+    dplyr::select(date, symbol, ret) %>%
+    tidyr::pivot_wider(names_from = symbol, values_from = ret) %>%
+    dplyr::select(-date)
+
+  cm   <- cor(window, use = "pairwise.complete.obs")
+  dm   <- as.dist(1 - cm)
+  hc_w <- hclust(dm, method = "ward.D2")
+  labs <- cutree(hc_w, k = K_USE)
+  tibble::tibble(date = end_date, symbol = names(labs), raw_cluster = as.integer(labs))
+}
+
+raw_clusters <- purrr::map_dfr(month_ends, cluster_one_window)
+
+# Relabel clusters across windows using maximum-overlap greedy matching
+relabel_rolling <- function(raw, k) {
+  windows <- sort(unique(raw$date))
+
+  first <- raw %>%
+    dplyr::filter(date == windows[1]) %>%
+    dplyr::mutate(cluster = raw_cluster)
+
+  out      <- first
+  prev_map <- first %>% dplyr::select(symbol, cluster) %>% tibble::deframe()
+
+  for (i in seq(2, length(windows))) {
+    curr <- raw %>% dplyr::filter(date == windows[i])
+    curr_map <- curr %>% dplyr::select(symbol, raw_cluster) %>% tibble::deframe()
+
+    # Build k x k overlap matrix: rows = old clusters, cols = new clusters
+    overlap <- outer(
+      1:k, 1:k,
+      Vectorize(function(old_c, new_c) {
+        length(intersect(names(prev_map[prev_map == old_c]),
+                         names(curr_map[curr_map == new_c])))
+      })
+    )
+
+    # Greedy one-to-one assignment
+    mapping   <- integer(k)
+    avail_old <- 1:k
+    avail_new <- 1:k
+
+    for (iter in 1:k) {
+      sub      <- overlap[avail_old, avail_new, drop = FALSE]
+      max_pos  <- which(sub == max(sub), arr.ind = TRUE)[1, ]
+      old_c    <- avail_old[max_pos[1]]
+      new_c    <- avail_new[max_pos[2]]
+      mapping[new_c] <- old_c
+      avail_old <- avail_old[avail_old != old_c]
+      avail_new <- avail_new[avail_new != new_c]
+    }
+
+    relabeled <- curr %>%
+      dplyr::mutate(cluster = mapping[raw_cluster])
+
+    out      <- dplyr::bind_rows(out, relabeled)
+    prev_map <- relabeled %>% dplyr::select(symbol, cluster) %>% tibble::deframe()
+  }
+  out
+}
+
+stable_clusters <- relabel_rolling(raw_clusters, K_USE)
+
+# Sector name map for display
+name_map_vec <- c(
+  XLB = "Materials", XLC = "Communications", XLE = "Energy",
+  XLF = "Financials", XLI = "Industrials",   XLK = "Technology",
+  XLP = "Cons. Staples", XLRE = "Real Estate", XLV = "Health Care",
+  XLU = "Utilities", XLY = "Cons. Disc."
+)
+
+heatmap_df <- stable_clusters %>%
+  dplyr::mutate(
+    sector  = name_map_vec[symbol],
+    cluster = factor(cluster)
+  )
+
+ggplot(heatmap_df, aes(x = date, y = sector, fill = cluster)) +
+  geom_tile(colour = "white", linewidth = 0.15) +
+  scale_fill_manual(
+    values = c("1" = "#2c7bb6", "2" = "#1a9641", "3" = "#d7191c"),
+    name   = "Cluster"
+  ) +
+  scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
+  labs(
+    title   = "Rolling Cluster Assignments Over Time (k = 3, 60-Day Window)",
+    subtitle = "Each cell = cluster assigned at that month-end. Labels matched across windows by maximum membership overlap.",
+    x       = NULL,
+    y       = NULL,
+    caption = "Training period June 2000 to December 2024. Monthly rebalancing frequency."
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(panel.grid = element_blank(),
+        axis.text.y = element_text(size = 9))
+```
+
+```{r cluster-stability-metrics}
+#| message: false
+#| warning: false
+#| echo: false
+
+# Window-to-window stability: % ETFs unchanged
+stability_ww <- stable_clusters %>%
+  dplyr::arrange(symbol, date) %>%
+  dplyr::group_by(symbol) %>%
+  dplyr::mutate(changed = cluster != dplyr::lag(cluster)) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(!is.na(changed)) %>%
+  dplyr::group_by(date) %>%
+  dplyr::summarise(pct_stable = mean(!changed), .groups = "drop")
+
+avg_stability <- round(mean(stability_ww$pct_stable) * 100, 1)
+
+# Per-ETF persistence: % of windows each ETF stays in its modal cluster
+per_etf <- stable_clusters %>%
+  dplyr::group_by(symbol) %>%
+  dplyr::summarise(
+    modal_cluster   = as.integer(names(which.max(table(cluster)))),
+    pct_in_modal    = round(mean(cluster == modal_cluster) * 100, 1),
+    n_switches      = sum(cluster != dplyr::lag(cluster), na.rm = TRUE),
+    .groups         = "drop"
+  ) %>%
+  dplyr::mutate(sector = name_map_vec[symbol]) %>%
+  dplyr::select(sector, modal_cluster, pct_in_modal, n_switches) %>%
+  dplyr::arrange(dplyr::desc(pct_in_modal))
+
+per_etf %>%
+  gt::gt() %>%
+  gt::tab_header(
+    title    = "Per-ETF Cluster Persistence",
+    subtitle = paste0("Average window-to-window stability: ", avg_stability,
+                      "% of ETFs unchanged each month")
+  ) %>%
+  gt::cols_label(
+    sector        = "Sector",
+    modal_cluster = "Primary Cluster",
+    pct_in_modal  = "Time in Primary Cluster (%)",
+    n_switches    = "Cluster Switches"
+  ) %>%
+  gt::fmt_number(columns = pct_in_modal, decimals = 1) %>%
+  gt::data_color(
+    columns = pct_in_modal,
+    palette = c("#d7191c", "white", "#1a9641"),
+    domain  = c(50, 100)
+  ) %>%
+  gt::tab_source_note("Modal cluster = cluster assigned most frequently over training period.")
+```
+
+The heatmap reveals that k = 3 with rolling return correlations alone produces highly unstable cluster assignments. Most ETFs switch clusters almost every month with no persistent color pattern, which means the strategy would be rebalancing into a different cluster structure nearly every period. This is a problem: mean reversion within a cluster requires that cluster to be stable long enough for the z-score signal to converge and the position to recover. Constant reshuffling generates transaction costs without giving the signal time to play out. The per-ETF stability table quantifies this -- sectors that theory predicts should be permanently defensive (Utilities, Consumer Staples, Health Care) are not consistently grouped together. Rolling return correlations alone are too regime-sensitive to serve as a reliable clustering input.
+
+### 3.9 Pivot: Adding Rolling Volatility as a Second Feature
+
+The instability finding above is not a reason to abandon clustering. It is a reason to enrich the feature set. Rolling return correlations capture the direction of co-movement but not the character of each ETF's risk profile. A defensive ETF and a cyclical ETF can temporarily correlate during a broad market rally, causing the algorithm to group them together even though their structural characters are completely different. Rolling realized volatility is a structural feature that is far more persistent: Utilities and Consumer Staples are low-vol in every market environment; Energy and Technology are high-vol across regimes. Adding volatility as a second clustering input gives the algorithm a stable anchor that persists through correlation regime shifts.
+
+The implementation combines two normalized distance matrices: the correlation distance (1 minus pairwise correlation, same as above) and a volatility distance (absolute difference in 60-day realized volatility between each ETF pair, normalized to a 0 to 1 scale). The combined distance is a 50/50 weighted average of the two, applied to the same Ward.D2 hierarchical clustering. The weight is a parameter that will be evaluated in the optimization section.
+
+```{r vol-feature-clustering}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-width: 11
+#| fig-height: 5
+
+VOL_WEIGHT <- 0.5  # weight on volatility distance (1 - VOL_WEIGHT on correlation)
+
+cluster_one_window_v2 <- function(end_date) {
+  window <- sector_train %>%
+    dplyr::filter(date <= end_date) %>%
+    dplyr::group_by(symbol) %>%
+    dplyr::slice_tail(n = LOOKBACK) %>%
+    dplyr::ungroup()
+
+  ret_wide <- window %>%
+    dplyr::select(date, symbol, ret) %>%
+    tidyr::pivot_wider(names_from = symbol, values_from = ret) %>%
+    dplyr::select(-date)
+
+  # Correlation distance
+  cm       <- cor(ret_wide, use = "pairwise.complete.obs")
+  dist_cor <- as.matrix(1 - cm)
+
+  # Volatility distance: normalized absolute difference in realized vol
+  etf_vols  <- apply(ret_wide, 2, sd, na.rm = TRUE) * sqrt(252)
+  vol_diff  <- as.matrix(dist(etf_vols, method = "euclidean"))
+  vol_range <- max(vol_diff)
+  dist_vol  <- if (vol_range > 0) vol_diff / vol_range else vol_diff
+
+  # Combined distance
+  dist_combined <- as.dist((1 - VOL_WEIGHT) * dist_cor + VOL_WEIGHT * dist_vol)
+
+  hc_v2 <- hclust(dist_combined, method = "ward.D2")
+  labs  <- cutree(hc_v2, k = K_USE)
+
+  tibble::tibble(date = end_date, symbol = names(labs), raw_cluster = as.integer(labs))
+}
+
+raw_v2     <- purrr::map_dfr(month_ends, cluster_one_window_v2)
+stable_v2  <- relabel_rolling(raw_v2, K_USE)
+
+heatmap_v2 <- stable_v2 %>%
+  dplyr::mutate(sector  = name_map_vec[symbol],
+                cluster = factor(cluster))
+
+ggplot(heatmap_v2, aes(x = date, y = sector, fill = cluster)) +
+  geom_tile(colour = "white", linewidth = 0.15) +
+  scale_fill_manual(
+    values = c("1" = "#2c7bb6", "2" = "#1a9641", "3" = "#d7191c"),
+    name   = "Cluster"
+  ) +
+  scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
+  labs(
+    title    = "Rolling Cluster Assignments: Correlation + Volatility Features (k = 3)",
+    subtitle = "Combined distance = 50% correlation distance + 50% volatility distance.",
+    x        = NULL,
+    y        = NULL,
+    caption  = "Training period June 2000 to December 2024. Monthly rebalancing frequency."
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(panel.grid    = element_blank(),
+        axis.text.y   = element_text(size = 9))
+```
+
+```{r vol-stability-metrics}
+#| message: false
+#| warning: false
+#| echo: false
+
+stability_v2 <- stable_v2 %>%
+  dplyr::arrange(symbol, date) %>%
+  dplyr::group_by(symbol) %>%
+  dplyr::mutate(changed = cluster != dplyr::lag(cluster)) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(!is.na(changed)) %>%
+  dplyr::group_by(date) %>%
+  dplyr::summarise(pct_stable = mean(!changed), .groups = "drop")
+
+avg_stability_v2 <- round(mean(stability_v2$pct_stable) * 100, 1)
+
+per_etf_v2 <- stable_v2 %>%
+  dplyr::group_by(symbol) %>%
+  dplyr::summarise(
+    modal_cluster = as.integer(names(which.max(table(cluster)))),
+    pct_in_modal  = round(mean(cluster == modal_cluster) * 100, 1),
+    n_switches    = sum(cluster != dplyr::lag(cluster), na.rm = TRUE),
+    .groups       = "drop"
+  ) %>%
+  dplyr::mutate(sector = name_map_vec[symbol]) %>%
+  dplyr::select(sector, modal_cluster, pct_in_modal, n_switches) %>%
+  dplyr::arrange(dplyr::desc(pct_in_modal))
+
+per_etf_v2 %>%
+  gt::gt() %>%
+  gt::tab_header(
+    title    = "Per-ETF Cluster Persistence: Correlation + Volatility Features",
+    subtitle = paste0("Average window-to-window stability: ", avg_stability_v2,
+                      "% of ETFs unchanged each month")
+  ) %>%
+  gt::cols_label(
+    sector        = "Sector",
+    modal_cluster = "Primary Cluster",
+    pct_in_modal  = "Time in Primary Cluster (%)",
+    n_switches    = "Cluster Switches"
+  ) %>%
+  gt::fmt_number(columns = pct_in_modal, decimals = 1) %>%
+  gt::data_color(
+    columns = pct_in_modal,
+    palette = c("#d7191c", "white", "#1a9641"),
+    domain  = c(50, 100)
+  ) %>%
+  gt::tab_source_note("Compare to correlation-only table above. Improvement in pct_in_modal and fewer switches indicates feature enrichment is working.")
+```
+
+*\[Compare heatmap and stability metrics to correlation-only version above. If persistence improves materially, adopt correlation + volatility as the clustering input going forward.\]*
+
+:::
+
+------------------------------------------------------------------------
+
+## 2. Data and Features
+
+```{r universe-table}
+#| message: false
+#| warning: false
+#| echo: false
+
+tibble::tibble(
+  Ticker = c("SPY", "XLB", "XLC", "XLE", "XLF", "XLI",
+             "XLK", "XLP", "XLRE", "XLV", "XLU", "XLY"),
+  Name   = c("SPDR S&P 500 ETF Trust", "Materials", "Communication Services",
+             "Energy", "Financials", "Industrials", "Technology",
+             "Consumer Staples", "Real Estate", "Health Care",
+             "Utilities", "Consumer Discretionary"),
+  Role   = c("Benchmark", rep("Traded", 11)),
+  `Available From` = c(
+    "2000-06-01", "2000-06-01", "2018-06-19", "2000-06-01",
+    "2000-06-01", "2000-06-01", "2000-06-01", "2000-06-01",
+    "2015-10-08", "2000-06-01", "2000-06-01", "2000-06-01"),
+  Source = rep("Yahoo Finance via tidyquant::tq_get()", 12)
+) %>%
+  gt::gt() %>%
+  gt::tab_header(
+    title    = "Universe: SPDR Sector ETFs and Benchmark",
+    subtitle = "Training: June 2000 to December 2024. Testing: January 2025 to March 2026."
+  ) %>%
+  gt::tab_style(
+    style     = gt::cell_fill(color = "#f0f4ff"),
+    locations = gt::cells_body(rows = Role == "Benchmark")
+  ) %>%
+  gt::tab_style(
+    style     = gt::cell_text(weight = "bold"),
+    locations = gt::cells_body(columns = Ticker)
+  ) %>%
+  gt::tab_source_note("XLC available from June 2018; XLRE from October 2015. Both included despite shorter histories.")
+```
+
+All price data is sourced via API with no local files. Log returns are computed as $r_t = \log(P_t / P_{t-1})$ on adjusted close prices, which account for dividends and splits. The training period runs through December 2024 and is the only window used to fit any model parameter; the testing period from January 2025 onward is strictly held out. SPY is carried as the benchmark throughout but is never included in the traded universe or the clustering.
+
+The clustering input in this revised approach is a feature matrix built from each ETF's relationship to SPY, not pairwise correlations between sector ETFs. This addresses the core instability problem identified in the original approach: correlations between sector ETFs are highly regime-sensitive and shift sharply during stress events, causing cluster assignments to flip frequently. SPY-relative features measure each ETF's structural character (how much it outperforms the market, how tightly it tracks it, and how it behaves during drawdowns), which are more persistent properties across market cycles. All three features share a single rolling window so the strategy has one tunable parameter rather than three independent ones.
+
+```{r features-table}
+#| message: false
+#| warning: false
+#| echo: false
+
+tibble::tibble(
+  Feature   = c("Cumulative Excess Return", "Beta", "Max Drawdown Ratio"),
+  Formula   = c(
+    "sum(r_ETF) - sum(r_SPY) over rolling window",
+    "cov(r_ETF, r_SPY) / var(r_SPY) over rolling window",
+    "MaxDD(ETF) / MaxDD(SPY) over rolling window"
+  ),
+  `What It Captures` = c(
+    "Has this ETF been outperforming or underperforming the market recently?",
+    "How sensitive is this ETF to broad market moves? High beta vs. defensive character.",
+    "Does this ETF suffer deeper drawdowns than the market? Tail risk character."
+  ),
+  `Rolling Window` = rep("Same tunable parameter (default: 60 days)", 3)
+) %>%
+  gt::gt() %>%
+  gt::tab_header(
+    title    = "Clustering Features: SPY-Relative Characteristics",
+    subtitle = "All features computed over the same rolling window. Normalized (z-score scaled) before clustering."
+  ) %>%
+  gt::tab_style(
+    style     = gt::cell_text(weight = "bold"),
+    locations = gt::cells_column_labels()
+  ) %>%
+  gt::cols_width(
+    Feature              ~ px(180),
+    Formula              ~ px(260),
+    `What It Captures`   ~ px(280),
+    `Rolling Window`     ~ px(200)
+  ) %>%
+  gt::tab_source_note("Features are z-score normalized before Euclidean distance is computed. Single rolling window = single optimization parameter.")
+```
+
+Normalizing all three features before clustering is essential because they operate on different scales: excess return is a small decimal, beta is centred near 1.0, and the drawdown ratio has no natural upper bound. Z-score scaling ensures no single feature dominates the distance matrix by virtue of its units. Max Drawdown Ratio is defined as the ETF's peak-to-trough decline divided by SPY's peak-to-trough decline over the same window, so a ratio above 1.0 means the ETF experienced a deeper drawdown than the market, a signature of cyclical, high-beta sectors. A ratio below 1.0 indicates defensive character. This gives the algorithm a tail-risk anchor that is structurally persistent even when short-run correlations are noisy.
+
+------------------------------------------------------------------------
+
+## 3. Clustering
 
 ------------------------------------------------------------------------
 
