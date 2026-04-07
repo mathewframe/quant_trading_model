@@ -3384,6 +3384,8 @@ xts::addSeries(
 )
 ```
 
+The four-panel chart reveals the most important limitation of this strategy in the testing period: it executed only one trade in 15 months. The Trades panel shows a single spike around late April 2025, coinciding with the tariff-driven market selloff, at which point the strategy rotated into a defensive or stress position as visible in the Position panel. After that episode resolved, the strategy returned to No Signal and held that position for the remainder of the test window without generating another rebalancing event. This is a direct consequence of the signal threshold being set at 0.050 — while this level was selected by maximizing Omega Ratio on the training surface, the realized spread between the Cyclical and Defensive clusters rarely crossed that threshold in the relatively low-volatility environment of mid-to-late 2025. A strategy that trades once in 15 months is not functioning as a dynamic rotation engine; it is functioning as a one-decision portfolio that happened to make the right call during one stress event. The risk-adjusted metrics look favorable in part because the strategy avoided the April 2025 drawdown, but the honest interpretation is that a single correct signal does not validate the full architecture — it is insufficient evidence that the clustering and Kalman filter machinery is producing repeatable, actionable signals across a range of market conditions.
+
 ### 10.2 Strategy vs SPY Equity Curve
 
 ```{r test-equity-curve}
@@ -3637,6 +3639,32 @@ It is worth being transparent about what this chart is doing: October 29, 2025 w
 
 ------------------------------------------------------------------------
 
-## 11. Lessons Learned
+## 11. Lessons Learned and Conclusion
 
-*\[Min 5 points x 3-5 sentences, FIN 440 QTP failures referenced.\]*
+### 11.1 Rolling Windows Fix the FIN 440 Fixed-Parameter Problem, But Threshold Selection Remains Hard
+
+In FIN 440, one of the clearest failures was setting fixed parameters over a multi-year window without any rolling re-estimation. A single threshold applied from 2022 to 2024 was inevitably calibrated to the dominant regime of the training period and failed when conditions changed. This project addressed that directly by implementing a 60-day rolling lookback window for cluster return computation and a 20-day SMA on cumulative returns, meaning the signal adapts continuously to recent market behavior rather than being anchored to a static historical level. However, the threshold problem was not fully solved: the signal threshold of 0.050 was still selected as a single fixed value from the optimization surface, and as the testing period demonstrated, a threshold calibrated on 24 years of training data may be too conservative for the tighter spread environment of a specific 15-month window. The lesson is that rolling windows are necessary but not sufficient; the thresholds that gate entry and exit also need to be adaptive, not fixed.
+
+### 11.2 Storytelling Bias Is Subtle and Must Be Named Explicitly
+
+In FIN 440, the observation that "the model performs better in volatile situations" was identified as storytelling bias: a post-hoc narrative built around what the data happened to show, rather than a feature that was intentionally designed. This project made the same mistake in Section 10.5, where the late-2025 zoom window was chosen to start on October 29, 2025, a date that coincided with the technology sector peak and therefore flattered the strategy's relative performance. The difference in this submission is that the bias was named and acknowledged directly in the commentary, rather than presented as evidence of the strategy's strength. Calling out storytelling bias explicitly does not eliminate it, but it is the honest practitioner's responsibility to distinguish between "this is what the data shows" and "this is a feature I designed and can reproduce." Every performance chart should be interrogated with the question: would this chart look the same if I chose a different start date?
+
+### 11.3 Outlier Sensitivity Was Tested This Time: COVID Robustness Check as a Direct Response to FIN 440
+
+In FIN 440, model parameters were heavily influenced by major outliers in the training period. A single dominant event shaped the optimization surface in ways that were not visible until the model was deployed out-of-sample. This project explicitly addressed that failure with a COVID robustness check in Section 9.6, re-running the full threshold optimization with the February to June 2020 period excluded from performance measurement. The result was that the optimal parameters were nearly identical with and without the exclusion window, which provides meaningful evidence that the selected thresholds are not simply "COVID-proof parameters" that exploit one extreme event. The broader lesson is that any training period containing one or two extreme events should be treated with skepticism until the optimizer has been shown to produce consistent results with and without those events.
+
+### 11.4 Signal Activity Must Be Validated: One Trade in 15 Months Is Not a Strategy
+
+The most uncomfortable result in the testing period is that the strategy executed exactly one trade over 15 months. The signal threshold of 0.050 was selected from the training optimization surface, but the realized spread between the Cyclical and Defensive clusters in the testing environment rarely reached that level, a consequence of the relatively low cross-sectional volatility of mid-to-late 2025. This is a failure mode that does not show up clearly in equity curves or performance tables, because a portfolio holding a prior position can still earn returns; the failure is that the strategy is not doing what it was designed to do. Any threshold-gated rotation strategy must be validated not just on risk-adjusted return metrics but on signal fire rate, average holding period, and number of state transitions. In future work, the threshold would be set as a percentile of the rolling spread distribution rather than a fixed level, so the signal frequency adapts to the volatility regime.
+
+### 11.5 Complexity Did Not Beat the Simplest Benchmark
+
+The most humbling result of this project is that a plain equal-weight buy-and-hold allocation across all eleven sector ETFs, requiring no clustering, no Kalman filter, no optimization, and no signal logic, outperformed the strategy on total return, annualized return, and most absolute metrics over the testing period. The strategy's edge was entirely in risk management: lower maximum drawdown (-5.6% vs -15.0% for Equal-Weight), better Sharpe, Omega, and Calmar ratios. In a rising market environment, lower volatility and lower drawdown come at the cost of lower participation in the upside, and over a 15-month test period in a broadly positive equity market, that tradeoff penalized the strategy significantly. This is not a reason to abandon the design, but it is a reason to be honest about what the strategy is: a capital preservation vehicle, not a return maximization engine. The lesson from FIN 440 and FIN 452 together is that model complexity must justify itself against simple baselines, and "it has a better Sharpe" is a weaker argument when the absolute return gap is large.
+
+### 11.6 Every Failure Is a Step Forward
+
+A year ago, building a quantitative trading strategy from scratch, with clustering, Kalman filtering, rolling signals, parallel optimization, and an execution loop with dividends and transaction costs, would have been an entirely foreign task. The FIN 440 model failed on fixed parameters, outlier sensitivity, and no significance testing. This model addressed all three of those failures by design and introduced new failures of its own: infrequent trading, a threshold calibrated to the wrong regime, and a complexity premium that was not earned in the test period. That progression, from not knowing what the mistakes are, to making intentional design choices that solve the last round of mistakes, to identifying a new set of more sophisticated problems, is what learning actually looks like. The model did not succeed in beating passive benchmarks, but the understanding of why it failed is worth more than a model that worked by accident.
+
+### 11.7 Conclusion
+
+I have improved drastically over my FIN 440 model, but there is still a ways to go. This is a testament that in order to succeed in anything, you need to try, try, and try again. Building a model is like a free lottery ticket, except the odds of striking gold increase every time as I continue to improve on past mistakes.
