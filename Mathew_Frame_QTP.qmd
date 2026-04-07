@@ -1402,13 +1402,171 @@ flowchart TD
 
 ## 4. Kalman Filter
 
-*\[Local level model, smoothed price and slope, hard gate rule, visualization, gate firing frequency.\]*
+The Kalman Filter is a recursive algorithm that estimates the true underlying level of a noisy time series, updating its estimate each period as new data arrives. Applied to each cluster's cumulative return series, it separates genuine trend from daily noise. The result is an adaptive long-run level estimate that responds faster than a fixed 200-day moving average when conditions shift, but is not whipped around by single-day spikes. Because `dlmFilter()` runs a forward pass only, each day's estimate uses only data available up to that point. There is no look-ahead bias.
+
+The model used is a local level model: the true level today equals the true level yesterday plus random drift. Two parameters control behaviour. `dV` is the observation variance, measuring how noisy the daily readings are. `dW` is the state evolution variance, measuring how fast the true level is allowed to change. A low `dW/dV` ratio produces a smoother, slower-moving filter. A high ratio lets the filter track the series more aggressively. The default ratio used here is 0.01, meaning the filter assumes the true level evolves slowly relative to daily noise. This parameter is tunable in the optimization section.
+
+```{r kalman-setup}
+#| message: false
+#| warning: false
+#| echo: false
+
+# Identify Cyclical vs Defensive from static cluster assignments
+cluster_beta_check <- feature_mat %>%
+  dplyr::left_join(
+    cluster_assignments_spy %>% dplyr::select(symbol, cluster),
+    by = "symbol"
+  ) %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::summarise(mean_beta = mean(beta), .groups = "drop")
+
+cyclical_id  <- cluster_beta_check %>% dplyr::slice_max(mean_beta, n = 1) %>% dplyr::pull(cluster)
+defensive_id <- cluster_beta_check %>% dplyr::slice_min(mean_beta, n = 1) %>% dplyr::pull(cluster)
+
+# Daily equal-weighted cluster returns using static assignments
+cluster_daily <- ret_train %>%
+  dplyr::filter(symbol %in% sector_tickers) %>%
+  dplyr::left_join(
+    cluster_assignments_spy %>% dplyr::select(symbol, cluster),
+    by = "symbol"
+  ) %>%
+  dplyr::group_by(date, cluster) %>%
+  dplyr::summarise(cluster_ret = mean(ret, na.rm = TRUE), .groups = "drop") %>%
+  dplyr::mutate(
+    cluster_label = dplyr::case_when(
+      cluster == cyclical_id  ~ "Cyclical",
+      cluster == defensive_id ~ "Defensive"
+    )
+  )
+
+# Cumulative returns per cluster
+cluster_cum <- cluster_daily %>%
+  dplyr::arrange(cluster_label, date) %>%
+  dplyr::group_by(cluster_label) %>%
+  dplyr::mutate(cum_ret = cumsum(cluster_ret)) %>%
+  dplyr::ungroup()
+
+# Kalman Filter: local level model, forward pass only
+KF_DW_SCALE <- 0.01  # dW/dV ratio -- tunable
+
+apply_kf <- function(x, dw_scale = KF_DW_SCALE) {
+  dv  <- var(diff(x), na.rm = TRUE)
+  mod <- dlm::dlmModPoly(order = 1, dV = dv, dW = dv * dw_scale)
+  flt <- dlm::dlmFilter(x, mod)
+  as.numeric(dlm::dropFirst(flt$m))
+}
+
+# 20-day SMA
+SMA_WINDOW <- 20
+
+cluster_signals <- cluster_cum %>%
+  dplyr::group_by(cluster_label) %>%
+  dplyr::arrange(date) %>%
+  dplyr::mutate(
+    kf_level = apply_kf(cum_ret),
+    sma_20   = TTR::SMA(cum_ret, n = SMA_WINDOW)
+  ) %>%
+  dplyr::ungroup()
+```
+
+```{r kalman-plot}
+#| message: false
+#| warning: false
+#| echo: false
+
+plot_df <- cluster_signals %>%
+  dplyr::filter(!is.na(sma_20)) %>%
+  tidyr::pivot_longer(
+    cols      = c(cum_ret, kf_level, sma_20),
+    names_to  = "series",
+    values_to = "value"
+  ) %>%
+  dplyr::mutate(
+    series = dplyr::recode(series,
+      cum_ret  = "Cumulative Return",
+      kf_level = "Kalman Level",
+      sma_20   = "20d SMA"
+    )
+  )
+
+colours <- c(
+  "Cumulative Return" = "#888888",
+  "Kalman Level"      = "#2c7bb6",
+  "20d SMA"           = "#d7191c"
+)
+
+make_panel <- function(df, label, show_legend = TRUE) {
+  d <- dplyr::filter(df, cluster_label == label)
+  plotly::plot_ly(d, x = ~date, y = ~value, color = ~series,
+                  colors = colours, type = "scatter", mode = "lines",
+                  line = list(width = 1.2), showlegend = show_legend) %>%
+    plotly::layout(
+      annotations = list(list(
+        text      = label, showarrow = FALSE,
+        x         = 0.5, y = 1.02, xref = "paper", yref = "paper",
+        font      = list(size = 13, color = "black"),
+        xanchor   = "center"
+      )),
+      yaxis = list(title = "Cumulative Log Return"),
+      xaxis = list(title = "")
+    )
+}
+
+p_cyc <- make_panel(plot_df, "Cyclical", show_legend = TRUE)
+p_def <- make_panel(plot_df, "Defensive", show_legend = FALSE)
+
+plotly::subplot(p_cyc, p_def, nrows = 2, shareX = FALSE, titleY = TRUE) %>%
+  plotly::layout(
+    title  = list(
+      text = paste0("Cluster Cumulative Returns: Raw vs Kalman Level vs 20d SMA<br>",
+                    "<sup>Kalman dW/dV = ", KF_DW_SCALE,
+                    ". 20d SMA = ", SMA_WINDOW, " days. Forward pass only. Zoom to inspect signal separation.</sup>"),
+      x = 0.5
+    ),
+    legend = list(orientation = "h", x = 0.5, xanchor = "center", y = -0.05)
+  )
+```
+
+The grey line is the raw cumulative return for each cluster. The blue line is the Kalman-filtered level: the filter's best estimate of where the cluster truly sits after removing daily noise. The red line is the 20-day SMA. The momentum spread used in the signal is the vertical distance between the red and blue lines each day. When red is above blue, the cluster is running ahead of its long-run trend. When red is below blue, the cluster has pulled back. The stress state fires when both clusters show red below blue simultaneously.
 
 ------------------------------------------------------------------------
 
 ## 5. Signal Generation
 
-*\[Within-cluster z-scores, inverse rank weighting, cross-cluster equal weight, worked example.\]*
+### 5.1 Momentum Spread
+
+The momentum spread is the 20d SMA minus the Kalman level for each cluster each day. A positive spread means the cluster is running above its long-run trend. A negative spread means it has pulled back below. The stress state fires when both spreads are negative simultaneously.
+
+```{r spread-chart}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-width: 10
+#| fig-height: 6
+
+spread_df <- cluster_signals %>%
+  dplyr::filter(!is.na(sma_20)) %>%
+  dplyr::mutate(spread = sma_20 - kf_level)
+
+ggplot(spread_df, aes(x = date, y = spread)) +
+  geom_line(aes(colour = cluster_label), linewidth = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "black", linewidth = 0.5) +
+  geom_ribbon(aes(ymin = pmin(spread, 0), ymax = 0, fill = cluster_label),
+              alpha = 0.15) +
+  scale_colour_manual(values = c("Cyclical" = "#d7191c", "Defensive" = "#2c7bb6")) +
+  scale_fill_manual(values   = c("Cyclical" = "#d7191c", "Defensive" = "#2c7bb6")) +
+  facet_wrap(~ cluster_label, ncol = 1) +
+  labs(
+    title    = "Momentum Spread per Cluster: 20d SMA minus Kalman Level",
+    subtitle = "Positive = cluster above long-run trend (momentum). Negative = below trend. Shaded area = below zero.",
+    x        = NULL,
+    y        = "Spread (cumulative log return units)",
+    caption  = "Training period June 2000 to December 2024. Stress state fires when both clusters simultaneously negative."
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "none",
+        strip.text      = element_text(face = "bold", size = 11))
+```
 
 ------------------------------------------------------------------------
 
