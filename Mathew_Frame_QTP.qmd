@@ -3322,7 +3322,69 @@ test_strat_r <- diff(test_results$portfolio_value) / head(test_results$portfolio
 test_strat_r <- test_strat_r[is.finite(test_strat_r)]
 ```
 
-### 10.1 Strategy vs SPY Equity Curve
+### 10.1 Strategy Results Chart
+
+```{r test-xts-chart}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-width: 11
+#| fig-height: 7
+#| fig-keep: last
+
+tick_test <- test_results %>%
+  dplyr::mutate(
+    strat_idx  = portfolio_value / dplyr::first(portfolio_value) * 100,
+    trade_flag = dplyr::if_else(tc > 0, 1L, 0L),
+    pos_num    = dplyr::case_when(
+      signal == "Momentum Cyclical"  ~  1,
+      signal == "Momentum Defensive" ~ -1,
+      signal == "Stress"             ~ -2,
+      TRUE                           ~  0
+    )
+  ) %>%
+  dplyr::select(date, strat_idx, trade_flag, pos_num) %>%
+  timetk::tk_xts(date_var = date)
+
+plot(tick_test$strat_idx,
+     main          = "Strategy Results",
+     ylab          = "Indexed to 100",
+     col           = "black",
+     lwd           = 1.2,
+     grid.ticks.on = "months")
+
+xts::addSeries(
+  tick_test$trade_flag,
+  main = "Trades",
+  on   = NA,
+  type = "h",
+  col  = "#2c7bb6",
+  lwd  = 1,
+  pch  = 0
+)
+
+xts::addSeries(
+  tick_test$pos_num,
+  main = "Position (1=Cyc, -1=Def, -2=Stress)",
+  on   = NA,
+  type = "h",
+  col  = "#2c7bb6",
+  lwd  = 1,
+  pch  = 0
+)
+
+xts::addSeries(
+  tick_test$strat_idx,
+  main = "CumEQ",
+  on   = NA,
+  type = "l",
+  col  = "#2c7bb6",
+  lwd  = 1,
+  pch  = 0
+)
+```
+
+### 10.2 Strategy vs SPY Equity Curve
 
 ```{r test-equity-curve}
 #| message: false
@@ -3421,7 +3483,7 @@ combined_test %>%
 
 The strategy underperformed all three benchmarks on total return over the 15-month test window, finishing at 6.5% versus SPY at 9.7%, Equal-Weight at 14.7%, and XLK at 10.8%. The honest explanation for most of that gap is that the technology sector had an exceptional run driven by AI investment themes, and SPY, Equal-Weight, and XLK all carried meaningful tech exposure. This strategy did not overweight technology, which is the correct decision — adding XLK exposure in hindsight would be speculative, not systematic, and would defeat the purpose of a rule-based signal. The strategy was not designed to chase sector momentum; it was designed to rotate between two structurally distinct clusters with risk control built in. Judged on that mandate, the equity curve tells a story of lower participation during the bull run but also visibly less damage during the April 2025 tariff shock and more stability through the volatile late-2025 period when all three benchmarks gave back gains.
 
-### 10.2 Drawdown Comparison
+### 10.3 Drawdown Comparison
 
 ```{r test-drawdown}
 #| message: false
@@ -3458,7 +3520,7 @@ combined_test %>%
 
 The drawdown chart is the clearest evidence in favour of the strategy's design. During the April 2025 tariff shock, SPY fell approximately 18% from peak and Equal-Weight fell roughly 15%, while the strategy's maximum drawdown was -5.6% across the entire test window. The stress detection mechanism appears to have done meaningful work during that episode, reducing equity exposure before or during the sharpest phase of the selloff. The strategy also held its value through the late-2025 period where the other benchmarks were flat to negative, which is visible as the blue line staying elevated while red and green declined. These are the conditions the stress state was designed for, and the drawdown chart validates that the mechanism is functioning as intended.
 
-### 10.3 Performance Metrics
+### 10.4 Performance Metrics
 
 ```{r test-performance-table}
 #| message: false
@@ -3522,7 +3584,7 @@ tibble::tibble(
 
 The performance table reinforces a mixed but honest verdict. On every risk-adjusted metric the strategy leads: Sharpe of 0.906 versus SPY's 0.499, Omega of 1.187 versus SPY's 1.106, Calmar of 0.982 versus SPY's 0.417, and a maximum drawdown of -5.6% against SPY's -18.8%. These numbers reflect a portfolio that genuinely managed downside risk better than any of the benchmarks shown. However, the strategy also trailed all three benchmarks on total return and annualised return, which is the harder result to dismiss. The Equal-Weight benchmark is a particular concern: it required no signal generation, no clustering, no Kalman filter, and no optimization, yet it returned 14.7% with a reasonable Omega of 1.177 and a Calmar of 0.783. That result raises a direct challenge to the value of complexity in this model. The most honest interpretation is that the strategy achieved its stated goal of capital preservation with favourable risk-adjusted metrics, but in a market environment where equities broadly trended upward over the test period, a lower-beta, more defensive posture was penalised on absolute return. **In the long run, equity markets go up, and a strategy that systematically reduces market exposure will likely underperform passive benchmarks over full cycles unless the risk reduction is severe enough to compound through avoided drawdowns** -- and 15 months is too short a window to know whether that is the case here.
 
-### 10.4 Late-2025 Zoom: October 29, 2025 Onward (Indexed to 100)
+### 10.5 Late-2025 Zoom: October 29, 2025 Onward (Indexed to 100)
 
 ```{r test-zoom-chart}
 #| message: false
