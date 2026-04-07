@@ -74,7 +74,7 @@ spy_test     <- ret_test  %>% dplyr::filter(symbol == "SPY")
 
 ## Executive Summary
 
-*\[To be written last. 3 sentences: strategy thesis, training result, testing result.\]*
+This strategy uses K-Means clustering to classify eleven Select Sector SPDR ETFs into Cyclical and Defensive groups, then applies a Kalman Filter and SMA-based spread signal to rotate capital toward the cluster with positive momentum while stepping aside into cash when both clusters deteriorate simultaneously. Over the 24-year training period from June 2000 to December 2024, the optimized strategy produced superior risk-adjusted results relative to SPY, including a Sharpe Ratio of 0.906 versus 0.499, an Omega Ratio of 1.187 versus 1.106, and a maximum drawdown of 5.6% versus 55.2%, achieved by correctly reducing equity exposure during the 2001, 2008, and 2020 bear markets. In the 15-month out-of-sample testing period from January 2025 to March 2026, the strategy continued to lead all benchmarks on risk-adjusted metrics but trailed on absolute return, executing only one trade due to a signal threshold calibrated on 24 years of training data that proved too conservative for the low cross-sectional volatility environment of the test period.
 
 ------------------------------------------------------------------------
 
@@ -411,7 +411,6 @@ p_sil4 <- factoextra::fviz_silhouette(sil4, print.summary = FALSE) +
   theme(legend.position = "none")
 ```
 
-*\[Review both silhouette plots and confirm final k before proceeding to Section 4.\]*
 
 ### 3.5 Revisiting k: Testing k = 5
 
@@ -577,7 +576,6 @@ p_sil6 <- factoextra::fviz_silhouette(sil6, print.summary = FALSE) +
   )
 ```
 
-*\[Review and confirm final k before proceeding to Section 4.\]*
 
 ### 3.8 Cluster Stability Over Time
 
@@ -1355,7 +1353,7 @@ Third, overall window-to-window stability is 77.3%, compared to the near-random 
 
 The Kalman Filter is a recursive algorithm that estimates the true underlying level of a noisy time series, updating its estimate each period as new data arrives. Applied to each cluster's cumulative return series, it separates genuine trend from daily noise. The result is an adaptive long-run level estimate that responds faster than a fixed 200-day moving average when conditions shift, but is not whipped around by single-day spikes. Because `dlmFilter()` runs a forward pass only, each day's estimate uses only data available up to that point. There is no look-ahead bias.
 
-The model used is a local level model: the true level today equals the true level yesterday plus random drift. Two parameters control behaviour. `dV` is the observation variance, measuring how noisy the daily readings are. `dW` is the state evolution variance, measuring how fast the true level is allowed to change. A low `dW/dV` ratio produces a smoother, slower-moving filter. A high ratio lets the filter track the series more aggressively. The default ratio used here is 0.01, meaning the filter assumes the true level evolves slowly relative to daily noise. This parameter is tunable in the optimization section.
+The model used is a local level model: the true level today equals the true level yesterday plus random drift. Two parameters control behaviour. `dV` is the observation variance, measuring how noisy the daily readings are. `dW` is the state evolution variance, measuring how fast the true level is allowed to change. A low `dW/dV` ratio produces a smoother, slower-moving filter. A high ratio lets the filter track the series more aggressively. The default ratio used here is 0.001, meaning the filter assumes the true level evolves slowly relative to daily noise. This parameter is tunable in the optimization section.
 
 ```{r kalman-setup}
 #| message: false
@@ -2298,7 +2296,7 @@ tibble::tibble(
     "Cyclical spread > signal threshold AND Cyclical >= Defensive",
     "Defensive spread > signal threshold AND Defensive > Cyclical",
     "Both spreads negative OR either spread exceeds magnitude threshold for 3 consecutive days",
-    "Spread difference below threshold — no trade, hold last active allocation"
+    "Spread difference below threshold: no trade, hold last active allocation"
   )
 ) %>%
   gt::gt() %>%
@@ -3384,7 +3382,7 @@ xts::addSeries(
 )
 ```
 
-The four-panel chart reveals the most important limitation of this strategy in the testing period: it executed only one trade in 15 months. The Trades panel shows a single spike around late April 2025, coinciding with the tariff-driven market selloff, at which point the strategy rotated into a defensive or stress position as visible in the Position panel. After that episode resolved, the strategy returned to No Signal and held that position for the remainder of the test window without generating another rebalancing event. This is a direct consequence of the signal threshold being set at 0.050 — while this level was selected by maximizing Omega Ratio on the training surface, the realized spread between the Cyclical and Defensive clusters rarely crossed that threshold in the relatively low-volatility environment of mid-to-late 2025. A strategy that trades once in 15 months is not functioning as a dynamic rotation engine; it is functioning as a one-decision portfolio that happened to make the right call during one stress event. The risk-adjusted metrics look favorable in part because the strategy avoided the April 2025 drawdown, but the honest interpretation is that a single correct signal does not validate the full architecture — it is insufficient evidence that the clustering and Kalman filter machinery is producing repeatable, actionable signals across a range of market conditions.
+The four-panel chart reveals the most important limitation of this strategy in the testing period: it executed only one trade in 15 months. The Trades panel shows a single spike around late April 2025, coinciding with the tariff-driven market selloff, at which point the strategy rotated into a defensive or stress position as visible in the Position panel. After that episode resolved, the strategy returned to No Signal and held that position for the remainder of the test window without generating another rebalancing event. This is a direct consequence of the signal threshold being set at 0.050: while this level was selected by maximizing Omega Ratio on the training surface, the realized spread between the Cyclical and Defensive clusters rarely crossed that threshold in the relatively low-volatility environment of mid-to-late 2025. A strategy that trades once in 15 months is not functioning as a dynamic rotation engine; it is functioning as a one-decision portfolio that happened to make the right call during one stress event. The risk-adjusted metrics look favorable in part because the strategy avoided the April 2025 drawdown, but the honest interpretation is that a single correct signal does not validate the full architecture. It is insufficient evidence that the clustering and Kalman filter machinery is producing repeatable, actionable signals across a range of market conditions.
 
 ### 10.2 Strategy vs SPY Equity Curve
 
@@ -3483,7 +3481,7 @@ combined_test %>%
   theme(legend.position = "bottom")
 ```
 
-The strategy underperformed all three benchmarks on total return over the 15-month test window, finishing at 6.5% versus SPY at 9.7%, Equal-Weight at 14.7%, and XLK at 10.8%. The honest explanation for most of that gap is that the technology sector had an exceptional run driven by AI investment themes, and SPY, Equal-Weight, and XLK all carried meaningful tech exposure. This strategy did not overweight technology, which is the correct decision — adding XLK exposure in hindsight would be speculative, not systematic, and would defeat the purpose of a rule-based signal. The strategy was not designed to chase sector momentum; it was designed to rotate between two structurally distinct clusters with risk control built in. Judged on that mandate, the equity curve tells a story of lower participation during the bull run but also visibly less damage during the April 2025 tariff shock and more stability through the volatile late-2025 period when all three benchmarks gave back gains.
+The strategy underperformed all three benchmarks on total return over the 15-month test window, finishing at 6.5% versus SPY at 9.7%, Equal-Weight at 14.7%, and XLK at 10.8%. The honest explanation for most of that gap is that the technology sector had an exceptional run driven by AI investment themes, and SPY, Equal-Weight, and XLK all carried meaningful tech exposure. This strategy did not overweight technology, which is the correct decision. Adding XLK exposure in hindsight would be speculative, not systematic, and would defeat the purpose of a rule-based signal. The strategy was not designed to chase sector momentum; it was designed to rotate between two structurally distinct clusters with risk control built in. Judged on that mandate, the equity curve tells a story of lower participation during the bull run but also visibly less damage during the April 2025 tariff shock and more stability through the volatile late-2025 period when all three benchmarks gave back gains.
 
 ### 10.3 Drawdown Comparison
 
@@ -3635,7 +3633,7 @@ combined_test %>%
   theme(legend.position = "bottom")
 ```
 
-It is worth being transparent about what this chart is doing: October 29, 2025 was chosen because it roughly coincides with where technology peaked before a multi-month decline, which flatters the strategy's relative performance. That is a form of **storytelling bias** — selecting a start date that makes the result look better than the full-period picture. Even acknowledging that bias explicitly, the strategy still did not outperform Equal-Weight over this window. Equal-Weight held its gains better through the late-2025 period and finished above the strategy's index level despite having no defensive mechanism at all. The strategy did protect capital relative to SPY and XLK during the drawdown period, which is consistent with its design, but the honest conclusion is that a simple passive equal allocation across all eleven sector ETFs was a harder benchmark to beat than anticipated — and this zoomed window, even when framed as favourably as possible, does not change that verdict.
+It is worth being transparent about what this chart is doing: October 29, 2025 was chosen because it roughly coincides with where technology peaked before a multi-month decline, which flatters the strategy's relative performance. That is a form of **storytelling bias**: selecting a start date that makes the result look better than the full-period picture. Even acknowledging that bias explicitly, the strategy still did not outperform Equal-Weight over this window. Equal-Weight held its gains better through the late-2025 period and finished above the strategy's index level despite having no defensive mechanism at all. The strategy did protect capital relative to SPY and XLK during the drawdown period, which is consistent with its design, but the honest conclusion is that a simple passive equal allocation across all eleven sector ETFs was a harder benchmark to beat than anticipated. This zoomed window, even when framed as favourably as possible, does not change that verdict.
 
 ------------------------------------------------------------------------
 
@@ -3661,10 +3659,24 @@ The most uncomfortable result in the testing period is that the strategy execute
 
 The most humbling result of this project is that a plain equal-weight buy-and-hold allocation across all eleven sector ETFs, requiring no clustering, no Kalman filter, no optimization, and no signal logic, outperformed the strategy on total return, annualized return, and most absolute metrics over the testing period. The strategy's edge was entirely in risk management: lower maximum drawdown (-5.6% vs -15.0% for Equal-Weight), better Sharpe, Omega, and Calmar ratios. In a rising market environment, lower volatility and lower drawdown come at the cost of lower participation in the upside, and over a 15-month test period in a broadly positive equity market, that tradeoff penalized the strategy significantly. This is not a reason to abandon the design, but it is a reason to be honest about what the strategy is: a capital preservation vehicle, not a return maximization engine. The lesson from FIN 440 and FIN 452 together is that model complexity must justify itself against simple baselines, and "it has a better Sharpe" is a weaker argument when the absolute return gap is large.
 
-### 11.6 Every Failure Is a Step Forward
+### 11.6 The Kalman Filter Responsiveness and Signal Threshold Compound Each Other
+
+The Kalman filter was designed to act as an adaptive proxy for a 200-day moving average, serving as the slow-moving long-run baseline against which short-term cluster momentum could be measured. The logic was straightforward: a 20-day SMA captures where the cluster has been recently, while the KF level captures where it has been over a much longer horizon. The spread between them, SMA minus KF level, would be positive when recent momentum is running ahead of the long-run trend and negative when the cluster is underperforming its baseline. This is conceptually identical to a moving average crossover signal, except the KF was chosen over a fixed 200-day SMA because it weights observations optimally given the noise in the series rather than treating every day in the window equally. The appeal of the design is that a single spread metric captures both the direction and the magnitude of short-term divergence from the long-run trend, giving a clean, economically interpretable signal for when to rotate into or out of a cluster.
+
+The Kalman filter in this strategy uses a dW/dV ratio of 0.001, which makes the filtered level an extremely slow-moving baseline. Because the KF level barely moves from day to day, the spread between the SMA and the KF level reflects deviation from a near-permanent long-run trend rather than any shorter-term relative divergence between the two clusters. This is conservative by design, but it has a compounding effect when combined with a signal threshold of 0.050: the spread has to be both large in absolute terms and sustained over multiple days before any signal fires. In a low cross-sectional volatility environment like mid-to-late 2025, neither condition was frequently met, which is a key reason the strategy executed only one trade in 15 months. The fix is not simply to lower the threshold or raise the KF responsiveness in isolation; both parameters need to be co-optimized, because a more responsive KF (say dW/dV = 0.005 or 0.01) produces a noisier spread that requires a recalibrated threshold to avoid excessive false signals. This interaction between the filter and the threshold was not modeled in the optimization grid, which searched over thresholds with KF responsiveness fixed, and including KF_DW_SCALE as a third optimization dimension is the single highest-priority improvement for a future version of this strategy.
+
+### 11.7 Within-Cluster Momentum Was Ignored, and It Cost Returns
+
+The strategy treats all ETFs within a cluster as interchangeable: once the Cyclical cluster is selected, every ETF in that group receives an equal share of the cyclical allocation. This completely ignores the fact that individual sectors within a cluster can diverge dramatically from one another. During the test period, XLK was the clear standout within the Cyclical cluster, driven by the AI investment theme, while other cyclical sectors like XLE and XLB lagged significantly. A strategy that rotates into the Cyclical cluster without distinguishing between its members will always capture the average, never the best. An improvement would be to add a within-cluster momentum layer: rank ETFs inside each cluster by recent return momentum and tilt the allocation toward the top performers rather than splitting equally. This would have meaningfully increased participation in the technology rally without requiring any change to the cluster structure or signal logic, and it is a natural next iteration that preserves the core architecture while adding a second level of return-seeking behaviour.
+
+### 11.8 The 80/20 Cluster Allocation Should Have Been Optimized, Not Fixed
+
+The 80/20 split between the selected and non-selected cluster was chosen as a diversification rule: always keep some exposure to both sides to avoid concentration risk. In practice, this rule costs conviction. When the strategy signals Momentum Cyclical, it puts 80% in the Cyclical cluster and 20% in Defensive, meaning it is always partially hedged against its own call. A trading model that has generated a signal should act on that signal with appropriate sizing, not automatically diversify away 20% of it regardless of signal strength. The 80/20 was never optimized as a parameter, which means it was an assumption masquerading as a design choice. Including the cluster allocation split in the optimization grid, allowing it to range from 60/40 to 100/0 depending on what the training data supports, would have produced a more honest and potentially more profitable position sizing rule. In markets where conviction is rewarded, playing it safe by construction is just a slower way to underperform.
+
+### 11.9 Every Failure Is a Step Forward
 
 A year ago, building a quantitative trading strategy from scratch, with clustering, Kalman filtering, rolling signals, parallel optimization, and an execution loop with dividends and transaction costs, would have been an entirely foreign task. The FIN 440 model failed on fixed parameters, outlier sensitivity, and no significance testing. This model addressed all three of those failures by design and introduced new failures of its own: infrequent trading, a threshold calibrated to the wrong regime, and a complexity premium that was not earned in the test period. That progression, from not knowing what the mistakes are, to making intentional design choices that solve the last round of mistakes, to identifying a new set of more sophisticated problems, is what learning actually looks like. The model did not succeed in beating passive benchmarks, but the understanding of why it failed is worth more than a model that worked by accident.
 
-### 11.7 Conclusion
+### 11.10 Conclusion
 
 I have improved drastically over my FIN 440 model, but there is still a ways to go. This is a testament that in order to succeed in anything, you need to try, try, and try again. Building a model is like a free lottery ticket, except the odds of striking gold increase every time as I continue to improve on past mistakes.
