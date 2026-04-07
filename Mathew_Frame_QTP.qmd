@@ -39,6 +39,7 @@ library(RTL)
 #| message: false
 #| warning: false
 #| echo: false
+#| cache: true
 
 tickers <- c("SPY", "XLB", "XLC", "XLE", "XLF", "XLI",
              "XLK", "XLP", "XLRE", "XLV", "XLU", "XLY")
@@ -1196,6 +1197,7 @@ Rather than relying on greedy overlap matching to track labels across rolling wi
 #| message: false
 #| warning: false
 #| echo: false
+#| cache: true
 #| fig-width: 11
 #| fig-height: 5
 
@@ -1568,6 +1570,7 @@ ggplot(spread_df, aes(x = date, y = spread)) +
 #| message: false
 #| warning: false
 #| echo: false
+#| cache: true
 
 # Cluster-level signals pivoted wide
 signals_wide <- cluster_signals %>%
@@ -1747,6 +1750,7 @@ Before building the execution loop, dividend data is verified. Dividends are col
 #| message: false
 #| warning: false
 #| echo: false
+#| cache: true
 
 dividends_raw <- purrr::map_dfr(sector_tickers, ~ {
   x <- quantmod::getDividends(.x, from = "2000-06-01", to = "2026-03-31",
@@ -1870,6 +1874,7 @@ The loop follows the same architecture as the dynamic portfolio rebalancing exer
 #| message: false
 #| warning: false
 #| echo: false
+#| cache: true
 
 n_days <- nrow(loop_data)
 
@@ -2019,7 +2024,7 @@ backtest_results <- loop_data %>%
 
 ------------------------------------------------------------------------
 
-## 7. Training Period Backtest
+## 7. Training Period Backtest (Pre-Optimization)
 
 ```{r backtest-prep}
 #| message: false
@@ -2264,13 +2269,677 @@ tibble::tibble(
 
 ## 8. Risk Appetite
 
-*\[Max drawdown tolerance, optimization objective, defensive trigger.\]*
+### 8.1 Maximum Drawdown Tolerance
+
+The strategy targets a maximum drawdown below 40%. This threshold is set with reference to the training period result of 35.1%, which demonstrates the stress state is doing meaningful work relative to SPY's 55.2% drawdown over the same period. A 40% hard cap is deliberately conservative relative to the training result, leaving headroom for the testing period where out-of-sample deterioration is expected. Most institutional mandates for multi-asset equity strategies sit in the 20-30% drawdown tolerance range. This strategy does not claim to meet that bar at current parameters, and the optimization section will explicitly test whether tighter stress triggers can push the drawdown lower without unacceptable return sacrifice.
+
+### 8.2 Optimization Objective
+
+The primary optimization objective is the **Omega ratio:** the ratio of cumulative gains above zero to cumulative losses below zero across all daily returns. Unlike Sharpe, which summarizes the distribution with only mean and variance, Omega uses the full return distribution and treats upside and downside asymmetrically. A strategy with Omega above 1.0 generates more total gains than losses; the higher the ratio, the more favorably the return distribution is skewed toward the investor. This is the right objective for a sector rotation strategy where the goal is to avoid large left-tail events rather than simply maximize average return. Calmar ratio is used as a secondary filter: only parameter combinations with a Calmar above 0.10 are retained, which eliminates cases where Omega looks acceptable but the strategy is hiding an unacceptable peak-to-trough decline. A pure return maximization objective would push the optimizer toward parameters that keep the strategy fully invested at all times, which would defeat the purpose of the stress state.
+
+### 8.3 Position Sizing
+
+Position sizing is equal-weight within each cluster, with cluster-level weights determined by the active signal state. The equal-weight convention is a deliberate choice rather than a constraint. It avoids concentration in whichever sector has the highest recent momentum, distributes risk across all ETFs within each cluster, and ensures the strategy is testing the cluster signal rather than a size-tilt signal. The known cost is underperformance relative to a cap-weighted benchmark during periods when a small number of mega-cap sectors dominate market returns. This is accepted as a structural feature of the approach.
+
+The four signal states and their corresponding allocations are:
+
+```{r risk-appetite-table}
+#| message: false
+#| warning: false
+#| echo: false
+
+tibble::tibble(
+  `Signal State`       = c("Momentum Cyclical", "Momentum Defensive",
+                            "Stress", "No Signal"),
+  `Cyclical Allocation` = c("80%", "20%", "10%", "Hold previous"),
+  `Defensive Allocation` = c("20%", "80%", "30%", "Hold previous"),
+  `Cash`               = c("0%", "0%", "60%", "Hold previous"),
+  `Trigger`            = c(
+    "Cyclical spread > signal threshold AND Cyclical >= Defensive",
+    "Defensive spread > signal threshold AND Defensive > Cyclical",
+    "Both spreads negative OR either spread exceeds magnitude threshold for 3 consecutive days",
+    "Spread difference below threshold — no trade, hold last active allocation"
+  )
+) %>%
+  gt::gt() %>%
+  gt::tab_header(
+    title    = "Signal States and Target Allocations",
+    subtitle = "Equal-weight within each cluster. Allocations applied to portfolio value at previous close."
+  ) %>%
+  gt::tab_style(
+    style     = gt::cell_text(weight = "bold"),
+    locations = gt::cells_column_labels()
+  ) %>%
+  gt::cols_width(
+    `Signal State`         ~ px(160),
+    `Cyclical Allocation`  ~ px(120),
+    `Defensive Allocation` ~ px(130),
+    Cash                   ~ px(80),
+    Trigger                ~ px(300)
+  ) %>%
+  gt::tab_source_note("Per-ETF weight = cluster allocation / number of available ETFs in cluster on that date.")
+```
+
+### 8.4 Tunable Parameters and Optimization Grid
+
+Four parameters govern the strategy's risk posture. All four are candidates for the optimization grid search in Section 9.
+
+```{r params-table}
+#| message: false
+#| warning: false
+#| echo: false
+
+tibble::tibble(
+  Parameter             = c("Signal Threshold", "Magnitude Threshold",
+                             "Stress Confirmation Days", "SMA Window"),
+  Variable              = c("SIGNAL_THRESHOLD", "MAGNITUDE_THRESHOLD",
+                             "STRESS_DAYS", "SMA_WINDOW"),
+  Default               = c("0.010", "0.080", "3", "20"),
+  `Optimization Range`  = c("0.005 to 0.030", "0.050 to 0.120",
+                             "2 to 5", "10 to 30"),
+  `Risk Interpretation` = c(
+    "Higher = fewer momentum signals, less trading, more time in No Signal",
+    "Higher = stress state fires less often, more equity exposure during volatile periods",
+    "Higher = stress confirmation slower, reduces whipsawing into cash",
+    "Shorter = faster momentum signal, more responsive but noisier"
+  )
+) %>%
+  gt::gt() %>%
+  gt::tab_header(
+    title    = "Tunable Parameters",
+    subtitle = "All parameters fitted on training data only. Applied unchanged to testing period."
+  ) %>%
+  gt::tab_style(
+    style     = gt::cell_text(weight = "bold"),
+    locations = gt::cells_column_labels()
+  ) %>%
+  gt::cols_width(
+    Parameter            ~ px(160),
+    Variable             ~ px(160),
+    Default              ~ px(80),
+    `Optimization Range` ~ px(140),
+    `Risk Interpretation`~ px(280)
+  ) %>%
+  gt::tab_source_note("KF dW/dV ratio fixed at 0.001. Lookback window fixed at 60 days. Both candidates for extended optimization given time.")
+```
 
 ------------------------------------------------------------------------
 
 ## 9. Optimization
 
-*\[Grid search over parameters, heat map, selected parameters.\]*
+The strategy has four tunable parameters: the rolling lookback window for clustering features, the SMA window used to compute the momentum spread, the absolute spread threshold that triggers a directional signal, and the magnitude threshold that triggers the stress state. Rather than hand-picking these by inspection (which would introduce selection bias), a grid search is run on the training period only. The objective is Omega Ratio: it captures the full return distribution above and below a threshold, not just the ratio of mean return to volatility. Calmar Ratio is used as a secondary filter to ensure winning parameter combinations are not hiding an unacceptable drawdown profile.
+
+Two optimization surfaces are produced. The first varies lookback window and SMA window while holding thresholds fixed. The second varies signal and magnitude thresholds while holding the window parameters fixed. This decomposition reflects the natural structure of the strategy: the window parameters govern how the signal is constructed, and the threshold parameters govern when it fires.
+
+### 9.1 Strategy Function
+
+```{r opt-setup}
+#| message: false
+#| warning: false
+#| echo: false
+
+run_strategy <- function(lookback_roll, sma_window, sig_thresh, mag_thresh,
+                         excl_start = NULL, excl_end = NULL) {
+
+  # ── Rolling cluster assignments ──────────────────────────────────────────────
+  all_d <- sector_train %>%
+    dplyr::filter(symbol == "XLK") %>%
+    dplyr::arrange(date) %>%
+    dplyr::pull(date)
+
+  me <- sector_train %>%
+    dplyr::filter(symbol == "XLK") %>%
+    dplyr::mutate(ym = lubridate::floor_date(date, "month")) %>%
+    dplyr::group_by(ym) %>%
+    dplyr::slice_max(date, n = 1) %>%
+    dplyr::ungroup() %>%
+    dplyr::filter(date >= all_d[lookback_roll]) %>%
+    dplyr::pull(date)
+
+  cw <- function(end_date) {
+    ws   <- sector_train %>%
+      dplyr::filter(date <= end_date) %>%
+      dplyr::group_by(symbol) %>%
+      dplyr::slice_tail(n = lookback_roll) %>%
+      dplyr::ungroup()
+    wspy <- spy_train %>%
+      dplyr::filter(date <= end_date) %>%
+      dplyr::slice_tail(n = lookback_roll)
+
+    sc  <- sum(wspy$ret, na.rm = TRUE)
+    sv  <- var(wspy$ret, na.rm = TRUE)
+    smd <- max_dd(wspy$ret)
+
+    feats <- ws %>%
+      dplyr::group_by(symbol) %>%
+      dplyr::summarise(
+        excess_ret = sum(ret, na.rm = TRUE) - sc,
+        beta       = cov(ret, wspy$ret[seq_len(dplyr::n())],
+                         use = "complete.obs") / sv,
+        mdd_ratio  = max_dd(ret) / smd,
+        .groups    = "drop"
+      )
+
+    mat <- scale(feats %>% dplyr::select(excess_ret, beta, mdd_ratio))
+    rownames(mat) <- feats$symbol
+    labs <- cutree(hclust(dist(mat, method = "euclidean"), method = "ward.D2"), k = 2)
+    mb   <- tapply(feats$beta, labs, mean)
+    cr   <- as.integer(names(which.max(mb)))
+    tibble::tibble(date    = end_date,
+                   symbol  = feats$symbol,
+                   cluster = ifelse(labs == cr, "Cyclical", "Defensive"))
+  }
+
+  rolling_r <- purrr::map_dfr(me, cw)
+
+  atd <- sector_train %>%
+    dplyr::filter(symbol == "XLK") %>%
+    dplyr::arrange(date) %>%
+    dplyr::select(date)
+
+  rf <- tidyr::expand_grid(date = atd$date, symbol = sector_tickers) %>%
+    dplyr::left_join(rolling_r %>% dplyr::select(date, symbol, cluster),
+                     by = c("date", "symbol")) %>%
+    dplyr::arrange(symbol, date) %>%
+    dplyr::group_by(symbol) %>%
+    tidyr::fill(cluster, .direction = "down") %>%
+    dplyr::ungroup() %>%
+    dplyr::mutate(cluster = dplyr::if_else(cluster == "Cyclical", 1L, 0L))
+
+  cwd <- rf %>%
+    tidyr::pivot_wider(names_from  = symbol,
+                       values_from = cluster,
+                       names_prefix = "clust_")
+
+  # ── KF + SMA + spread ────────────────────────────────────────────────────────
+  cs <- cluster_daily %>%
+    dplyr::group_by(cluster_label) %>%
+    dplyr::arrange(date) %>%
+    dplyr::mutate(
+      cum_ret  = cumsum(cluster_ret),
+      kf_level = apply_kf(cum_ret, dw_scale = KF_DW_SCALE),
+      sma_n    = TTR::SMA(cum_ret, n = sma_window)
+    ) %>%
+    dplyr::ungroup()
+
+  sr <- cs %>%
+    dplyr::filter(!is.na(sma_n)) %>%
+    dplyr::mutate(spread = sma_n - kf_level) %>%
+    dplyr::select(date, cluster_label, spread) %>%
+    tidyr::pivot_wider(names_from = cluster_label, values_from = spread) %>%
+    dplyr::arrange(date) %>%
+    dplyr::mutate(
+      stress_raw = (Cyclical < 0 & Defensive < 0) |
+                   abs(Cyclical) > mag_thresh      |
+                   abs(Defensive) > mag_thresh,
+      stress_confirmed = slider::slide_lgl(
+        stress_raw, ~all(.x), .before = STRESS_DAYS - 1, .complete = TRUE
+      ),
+      stress_confirmed = tidyr::replace_na(stress_confirmed, FALSE),
+      signal = dplyr::case_when(
+        stress_confirmed                                  ~ "Stress",
+        Cyclical  > sig_thresh & Cyclical  >= Defensive  ~ "Momentum Cyclical",
+        Defensive > sig_thresh & Defensive >  Cyclical   ~ "Momentum Defensive",
+        TRUE                                              ~ "No Signal"
+      )
+    )
+
+  # ── Loop data ─────────────────────────────────────────────────────────────────
+  ld <- prices_wide %>%
+    dplyr::left_join(div_wide, by = "date") %>%
+    dplyr::left_join(cwd,      by = "date") %>%
+    dplyr::left_join(sr %>% dplyr::select(date, signal), by = "date") %>%
+    dplyr::arrange(date) %>%
+    dplyr::filter(!is.na(signal), date <= TRAIN_END) %>%
+    dplyr::mutate(dplyr::across(dplyr::starts_with("div_"),
+                                ~tidyr::replace_na(.x, 0)))
+
+  # Optional: exclude a stress period from performance measurement
+  if (!is.null(excl_start) && !is.null(excl_end)) {
+    ld <- ld %>% dplyr::filter(date < as.Date(excl_start) | date > as.Date(excl_end))
+  }
+
+  n     <- nrow(ld)
+  pv_h  <- numeric(n)
+  sig_h <- character(n)
+
+  cur_cash   <- INITIAL_CAPITAL
+  cur_shares <- setNames(rep(0, length(sector_tickers)), sector_tickers)
+  pend_sig   <- NA_character_
+  prev_pv    <- INITIAL_CAPITAL
+
+  for (i in seq_len(n)) {
+    td  <- ld[i, ]
+    tds <- as.character(td$signal)
+
+    div_inc <- sum(sapply(sector_tickers, function(etf) {
+      dc <- paste0("div_", etf)
+      if (dc %in% names(td)) {
+        dv <- td[[dc]]
+        if (!is.na(dv) && dv > 0) return(cur_shares[[etf]] * dv)
+      }
+      0
+    }), na.rm = TRUE)
+    cur_cash <- cur_cash + div_inc
+
+    tc <- 0
+    if (!is.na(pend_sig) && pend_sig != "No Signal") {
+      alloc <- get_alloc(pend_sig)
+      ct <- setNames(sapply(sector_tickers, function(etf) {
+        col <- paste0("clust_", etf)
+        if (col %in% names(td)) td[[col]] else NA_integer_
+      }), sector_tickers)
+      ac <- sector_tickers[!is.na(ct) & ct == 1 &
+              !is.na(sapply(sector_tickers, function(e) td[[paste0(e, "_open")]]))]
+      ad <- sector_tickers[!is.na(ct) & ct == 0 &
+              !is.na(sapply(sector_tickers, function(e) td[[paste0(e, "_open")]]))]
+      tw <- setNames(rep(0, length(sector_tickers)), sector_tickers)
+      if (length(ac) > 0) tw[ac] <- alloc$cyc / length(ac)
+      if (length(ad) > 0) tw[ad] <- alloc$def / length(ad)
+      tdols <- prev_pv * tw
+      ns    <- cur_shares
+      for (etf in sector_tickers) {
+        op <- td[[paste0(etf, "_open")]]
+        if (is.na(op) || op <= 0) next
+        ns[[etf]]  <- tdols[[etf]] / op
+        dlt        <- ns[[etf]] - cur_shares[[etf]]
+        cur_cash   <- cur_cash - dlt * op
+        tc         <- tc + abs(dlt * op) * TC_RATE
+      }
+      cur_cash   <- cur_cash - tc
+      cur_shares <- ns
+    }
+
+    eq <- sum(sapply(sector_tickers, function(etf) {
+      cp <- td[[paste0(etf, "_close")]]
+      if (!is.na(cp) && cp > 0) cur_shares[[etf]] * cp else 0
+    }), na.rm = TRUE)
+
+    pv        <- eq + cur_cash
+    pv_h[i]   <- pv
+    sig_h[i]  <- tds
+
+    ps       <- if (i == 1) NA_character_ else sig_h[i - 1]
+    pend_sig <- dplyr::case_when(
+      is.na(ps)  & tds != "No Signal"              ~ tds,
+      !is.na(ps) & tds != ps & tds != "No Signal"  ~ tds,
+      TRUE                                          ~ NA_character_
+    )
+    prev_pv <- pv
+  }
+
+  r <- diff(pv_h) / head(pv_h, -1)
+  r <- r[is.finite(r)]
+
+  tibble::tibble(
+    lookback_roll = lookback_roll,
+    sma_window    = sma_window,
+    sig_thresh    = sig_thresh,
+    mag_thresh    = mag_thresh,
+    omega         = omega_ratio(r),
+    calmar_r      = calmar(r),
+    sharpe        = mean(r, na.rm = TRUE) / sd(r, na.rm = TRUE) * sqrt(252),
+    max_dd_pct    = round(max_dd(r) * 100, 2)
+  )
+}
+```
+
+### 9.2 Grid Search
+
+Two 10-by-10 grids are searched in parallel using `doParallel`. Thresholds are optimized first because they have the most direct effect on strategy behaviour: they determine how often the strategy enters a position at all. Grid 1 varies the signal threshold (0.003 to 0.030) and the magnitude threshold (0.010 to 0.100), with window parameters held at their defaults. The magnitude threshold range is extended down to 0.010 to capture the region where the surface showed the most sensitivity. Grid 2 then varies the lookback window and SMA window using the best thresholds identified in Grid 1. Results are cached to avoid re-running the full search on every render.
+
+```{r opt-grid1}
+#| message: false
+#| warning: false
+#| echo: false
+#| cache: true
+
+grid1 <- tidyr::expand_grid(
+  sig_thresh = c(0.005, 0.010, 0.015, 0.020, 0.025, 0.030, 0.040, 0.050, 0.060, 0.080),
+  mag_thresh = c(0.010, 0.020, 0.030, 0.040, 0.050, 0.060, 0.070, 0.080, 0.090, 0.100)
+)
+
+n_cores <- max(1, parallel::detectCores() - 1)
+cl1 <- parallel::makeCluster(n_cores)
+doParallel::registerDoParallel(cl1)
+
+parallel::clusterExport(cl1, varlist = c(
+  "run_strategy",
+  "sector_train", "spy_train", "prices_wide", "div_wide",
+  "cluster_daily", "sector_tickers",
+  "max_dd", "apply_kf", "get_alloc", "omega_ratio", "calmar", "ann_ret",
+  "TRAIN_END", "STRESS_DAYS", "KF_DW_SCALE", "INITIAL_CAPITAL", "TC_RATE"
+), envir = globalenv())
+
+invisible(parallel::clusterEvalQ(cl1, {
+  library(tidyverse); library(dlm); library(TTR); library(slider); library(lubridate)
+}))
+
+opt1 <- foreach::foreach(
+  i         = seq_len(nrow(grid1)),
+  .combine  = dplyr::bind_rows,
+  .packages = c("dplyr", "tidyr", "purrr", "lubridate", "TTR", "dlm", "slider")
+) %dopar% {
+  run_strategy(
+    lookback_roll = 60,
+    sma_window    = 20,
+    sig_thresh    = grid1$sig_thresh[i],
+    mag_thresh    = grid1$mag_thresh[i]
+  )
+}
+
+parallel::stopCluster(cl1)
+```
+
+```{r opt-grid2}
+#| message: false
+#| warning: false
+#| echo: false
+#| cache: true
+
+# Best thresholds from Grid 1: max Omega subject to Calmar > 0.10
+best1 <- opt1 %>%
+  dplyr::filter(calmar_r > 0.10) %>%
+  dplyr::slice_max(omega, n = 1)
+
+best_sig <- if (nrow(best1) > 0) best1$sig_thresh[1] else 0.010
+best_mag <- if (nrow(best1) > 0) best1$mag_thresh[1] else 0.080
+
+grid2 <- tidyr::expand_grid(
+  lookback_roll = seq(40, 85, by = 5),
+  sma_window    = c(5, 8, 10, 13, 15, 18, 20, 23, 25, 30)
+)
+
+cl2 <- parallel::makeCluster(n_cores)
+doParallel::registerDoParallel(cl2)
+
+parallel::clusterExport(cl2, varlist = c(
+  "run_strategy",
+  "sector_train", "spy_train", "prices_wide", "div_wide",
+  "cluster_daily", "sector_tickers",
+  "max_dd", "apply_kf", "get_alloc", "omega_ratio", "calmar", "ann_ret",
+  "TRAIN_END", "STRESS_DAYS", "KF_DW_SCALE", "INITIAL_CAPITAL", "TC_RATE",
+  "best_sig", "best_mag"
+), envir = globalenv())
+
+invisible(parallel::clusterEvalQ(cl2, {
+  library(tidyverse); library(dlm); library(TTR); library(slider); library(lubridate)
+}))
+
+opt2 <- foreach::foreach(
+  i         = seq_len(nrow(grid2)),
+  .combine  = dplyr::bind_rows,
+  .packages = c("dplyr", "tidyr", "purrr", "lubridate", "TTR", "dlm", "slider")
+) %dopar% {
+  run_strategy(
+    lookback_roll = grid2$lookback_roll[i],
+    sma_window    = grid2$sma_window[i],
+    sig_thresh    = best_sig,
+    mag_thresh    = best_mag
+  )
+}
+
+parallel::stopCluster(cl2)
+```
+
+### 9.3 Optimization Surfaces
+
+```{r opt-surface1}
+#| message: false
+#| warning: false
+#| echo: false
+
+par_sig <- sort(unique(opt1$sig_thresh))
+par_mag <- sort(unique(opt1$mag_thresh))
+
+z_omega1 <- opt1 %>%
+  dplyr::select(sig_thresh, mag_thresh, omega) %>%
+  tidyr::pivot_wider(names_from = mag_thresh, values_from = omega) %>%
+  dplyr::select(-sig_thresh) %>%
+  as.matrix()
+
+plotly::plot_ly(
+  x = ~par_mag,
+  y = ~par_sig,
+  z = ~z_omega1
+) %>%
+  plotly::add_surface(colorscale = "Viridis") %>%
+  plotly::layout(
+    title = list(
+      text = "Grid 1: Omega Ratio by Signal and Magnitude Thresholds<br><sup>Lookback = 60 days, SMA = 20 days. Training period only.</sup>",
+      x = 0.5
+    ),
+    scene = list(
+      xaxis = list(title = "Magnitude Threshold"),
+      yaxis = list(title = "Signal Threshold"),
+      zaxis = list(title = "Omega Ratio")
+    )
+  )
+```
+
+Grid 1 shows a broad elevated ridge at signal threshold 0.010 to 0.050 and magnitude threshold 0.050 to 0.080, with Omega staying above 1.12 across the entire region. The peak at sig = 0.050 and mag = 0.070 is not a sharp isolated spike; the surrounding cells are nearly as strong, which means the strategy is not dependent on hitting an exact parameter value. This plateau shape is the target outcome: it indicates the edge is structural rather than coincidental. Performance collapses at high signal thresholds (0.060 to 0.080) because the strategy almost never fires a momentum signal, and at very low magnitude thresholds (0.010 to 0.030) because the stress state is too easily triggered, parking the portfolio in cash during periods that did not warrant it.
+
+```{r opt-surface2}
+#| message: false
+#| warning: false
+#| echo: false
+
+par_lookback <- sort(unique(opt2$lookback_roll))
+par_sma      <- sort(unique(opt2$sma_window))
+
+z_omega2 <- opt2 %>%
+  dplyr::select(lookback_roll, sma_window, omega) %>%
+  tidyr::pivot_wider(names_from = sma_window, values_from = omega) %>%
+  dplyr::select(-lookback_roll) %>%
+  as.matrix()
+
+plotly::plot_ly(
+  x = ~par_sma,
+  y = ~par_lookback,
+  z = ~z_omega2
+) %>%
+  plotly::add_surface(colorscale = "Viridis") %>%
+  plotly::layout(
+    title = list(
+      text = paste0("Grid 2: Omega Ratio by Lookback and SMA Window<br>",
+                    "<sup>Signal threshold = ", best_sig,
+                    ", Magnitude threshold = ", best_mag,
+                    ". Training period only.</sup>"),
+      x = 0.5
+    ),
+    scene = list(
+      xaxis = list(title = "SMA Window (days)"),
+      yaxis = list(title = "Lookback Window (days)"),
+      zaxis = list(title = "Omega Ratio")
+    )
+  )
+```
+
+Grid 2 is noisier than Grid 1, which confirms that window parameters drive less of the performance difference than thresholds do. The selected lookback of 50 days and SMA of 23 days sit in an elevated region but the surface has more variance around them. The 3-day difference between SMA = 20 and SMA = 23 is not meaningful in isolation; the takeaway is that the strategy is not sensitive to small changes in window length. The slightly shorter lookback of 50 days versus the default of 60 makes intuitive sense: it allows the clustering features to respond to recent regime changes without sacrificing stability.
+
+### 9.4 Selected Parameters
+
+The surfaces above show which parameter combinations produce the highest Omega Ratio on the training period. The final parameters are selected from the intersection of a high-Omega region and a Calmar Ratio above 0.10, which filters out combinations that inflate returns at the cost of large drawdowns. Parameters near the edge of the search range are treated with skepticism: a peak at the boundary suggests the optimum lies outside the grid and the apparent result may not generalize.
+
+```{r opt-selected}
+#| message: false
+#| warning: false
+#| echo: false
+
+# Grid 1 best: thresholds (max Omega, Calmar > 0.10)
+best_g1 <- opt1 %>%
+  dplyr::filter(calmar_r > 0.10) %>%
+  dplyr::slice_max(omega, n = 1)
+
+# Grid 2 best: windows (max Omega, Calmar > 0.10)
+best_g2 <- opt2 %>%
+  dplyr::filter(calmar_r > 0.10) %>%
+  dplyr::slice_max(omega, n = 1)
+
+final_params <- tibble::tibble(
+  Parameter   = c("Signal Threshold", "Magnitude Threshold",
+                  "Lookback Window",  "SMA Window"),
+  Default     = c(0.010, 0.080, 60, 20),
+  Selected    = c(
+    if (nrow(best_g1) > 0) best_g1$sig_thresh[1]    else 0.010,
+    if (nrow(best_g1) > 0) best_g1$mag_thresh[1]    else 0.080,
+    if (nrow(best_g2) > 0) best_g2$lookback_roll[1] else 60,
+    if (nrow(best_g2) > 0) best_g2$sma_window[1]    else 20
+  ),
+  `Omega at Selected` = c(
+    if (nrow(best_g1) > 0) round(best_g1$omega[1], 3) else NA,
+    if (nrow(best_g1) > 0) round(best_g1$omega[1], 3) else NA,
+    if (nrow(best_g2) > 0) round(best_g2$omega[1], 3) else NA,
+    if (nrow(best_g2) > 0) round(best_g2$omega[1], 3) else NA
+  ),
+  `Calmar at Selected` = c(
+    if (nrow(best_g1) > 0) round(best_g1$calmar_r[1], 3) else NA,
+    if (nrow(best_g1) > 0) round(best_g1$calmar_r[1], 3) else NA,
+    if (nrow(best_g2) > 0) round(best_g2$calmar_r[1], 3) else NA,
+    if (nrow(best_g2) > 0) round(best_g2$calmar_r[1], 3) else NA
+  )
+)
+
+final_params %>%
+  gt::gt() %>%
+  gt::tab_header(
+    title    = "Optimization Results: Selected Parameters",
+    subtitle = "Objective: maximize Omega Ratio. Filter: Calmar Ratio > 0.10. Training period only."
+  ) %>%
+  gt::fmt_number(columns = c(Default, Selected), decimals = 3) %>%
+  gt::fmt_number(columns = c(`Omega at Selected`, `Calmar at Selected`), decimals = 3) %>%
+  gt::tab_style(
+    style     = gt::cell_text(weight = "bold"),
+    locations = gt::cells_column_labels()
+  ) %>%
+  gt::tab_style(
+    style     = gt::cell_fill(color = "#e8f5e9"),
+    locations = gt::cells_body(columns = Selected)
+  ) %>%
+  gt::tab_source_note("Parameters fit on training data only. No refitting on testing period.")
+```
+
+The optimization is intentionally constrained. With only 11 ETFs and two clusters, the strategy has limited degrees of freedom, so over-fitting is a real risk on a 24-year training window. The Calmar filter is designed to penalize combinations that happen to catch a strong run while concealing a destructive drawdown. The goal is a parameter set that sits in a stable plateau on the surface, not a single sharp peak. A combination at the centre of a broad high-Omega region generalizes better than one at a narrow spike, even if the spike appears higher on the training surface.
+
+### 9.5 COVID Robustness Check
+
+A legitimate concern with any optimization over the 2000-2024 training period is that the winning parameters may simply be those that happened to avoid the COVID crash of February to April 2020. That event produced the sharpest drawdown in the dataset and would disproportionately reward any parameter set that kept the strategy in cash during those months. To test whether the selected parameters are genuinely better or just COVID-lucky, the threshold grid is re-run with the COVID stress period excluded from performance measurement. If the same parameters win on both surfaces, the selection is robust. If different parameters win, the original result is partly an artifact of a single event.
+
+```{r opt-covid-robust}
+#| message: false
+#| warning: false
+#| echo: false
+#| cache: true
+
+COVID_EXCL_START <- "2020-02-15"
+COVID_EXCL_END   <- "2020-06-30"
+
+cl3 <- parallel::makeCluster(n_cores)
+doParallel::registerDoParallel(cl3)
+
+parallel::clusterExport(cl3, varlist = c(
+  "run_strategy",
+  "sector_train", "spy_train", "prices_wide", "div_wide",
+  "cluster_daily", "sector_tickers",
+  "max_dd", "apply_kf", "get_alloc", "omega_ratio", "calmar", "ann_ret",
+  "TRAIN_END", "STRESS_DAYS", "KF_DW_SCALE", "INITIAL_CAPITAL", "TC_RATE",
+  "COVID_EXCL_START", "COVID_EXCL_END"
+), envir = globalenv())
+
+invisible(parallel::clusterEvalQ(cl3, {
+  library(tidyverse); library(dlm); library(TTR); library(slider); library(lubridate)
+}))
+
+opt_covid <- foreach::foreach(
+  i         = seq_len(nrow(grid1)),
+  .combine  = dplyr::bind_rows,
+  .packages = c("dplyr", "tidyr", "purrr", "lubridate", "TTR", "dlm", "slider")
+) %dopar% {
+  run_strategy(
+    lookback_roll = 60,
+    sma_window    = 20,
+    sig_thresh    = grid1$sig_thresh[i],
+    mag_thresh    = grid1$mag_thresh[i],
+    excl_start    = COVID_EXCL_START,
+    excl_end      = COVID_EXCL_END
+  )
+}
+
+parallel::stopCluster(cl3)
+```
+
+```{r opt-covid-surface}
+#| message: false
+#| warning: false
+#| echo: false
+
+par_sig_c <- sort(unique(opt_covid$sig_thresh))
+par_mag_c <- sort(unique(opt_covid$mag_thresh))
+
+z_covid <- opt_covid %>%
+  dplyr::select(sig_thresh, mag_thresh, omega) %>%
+  tidyr::pivot_wider(names_from = mag_thresh, values_from = omega) %>%
+  dplyr::select(-sig_thresh) %>%
+  as.matrix()
+
+plotly::plot_ly(
+  x = ~par_mag_c,
+  y = ~par_sig_c,
+  z = ~z_covid
+) %>%
+  plotly::add_surface(colorscale = "Viridis") %>%
+  plotly::layout(
+    title = list(
+      text = "COVID Robustness: Omega Ratio Excluding Feb-Jun 2020<br><sup>Same threshold grid as Grid 1. Lookback = 60 days, SMA = 20 days.</sup>",
+      x = 0.5
+    ),
+    scene = list(
+      xaxis = list(title = "Magnitude Threshold"),
+      yaxis = list(title = "Signal Threshold"),
+      zaxis = list(title = "Omega Ratio")
+    )
+  )
+```
+
+```{r opt-covid-comparison}
+#| message: false
+#| warning: false
+#| echo: false
+
+best_covid <- opt_covid %>%
+  dplyr::filter(calmar_r > 0.10) %>%
+  dplyr::slice_max(omega, n = 1)
+
+dplyr::bind_rows(
+  opt1 %>%
+    dplyr::filter(calmar_r > 0.10) %>%
+    dplyr::slice_max(omega, n = 1) %>%
+    dplyr::mutate(Dataset = "Full Training (incl. COVID)"),
+  best_covid %>%
+    dplyr::mutate(Dataset = "COVID Excluded (Feb-Jun 2020)")
+) %>%
+  dplyr::select(Dataset, sig_thresh, mag_thresh, omega, calmar_r) %>%
+  dplyr::rename(
+    `Signal Threshold`    = sig_thresh,
+    `Magnitude Threshold` = mag_thresh,
+    `Omega Ratio`         = omega,
+    `Calmar Ratio`        = calmar_r
+  ) %>%
+  gt::gt() %>%
+  gt::tab_header(
+    title    = "COVID Robustness: Optimal Thresholds With vs. Without COVID",
+    subtitle = "If selected parameters are consistent, the optimization is not COVID-driven."
+  ) %>%
+  gt::fmt_number(columns = c(`Signal Threshold`, `Magnitude Threshold`), decimals = 3) %>%
+  gt::fmt_number(columns = c(`Omega Ratio`, `Calmar Ratio`), decimals = 3) %>%
+  gt::tab_style(
+    style     = gt::cell_text(weight = "bold"),
+    locations = gt::cells_column_labels()
+  ) %>%
+  gt::tab_source_note("Window parameters fixed at defaults for comparability. COVID period defined as Feb 15 to Jun 30, 2020.")
+```
+
+The COVID robustness result is the strongest possible outcome: optimal parameters are identical to the decimal place, and Omega changes by 0.001. Removing the sharpest drawdown event in the dataset makes essentially no difference to which parameter combination wins. This directly addresses a failure from the FIN 440 quantitative trading project, where the strategy was unknowingly optimized against the COVID period. The FIN 440 model identified a set of parameters that happened to keep the portfolio in cash during February to April 2020, which produced excellent training metrics but generated almost no return in the testing period because the strategy had no genuine edge -- **it was a COVID avoidance model, not a trading model.** The design choices here explicitly guard against that outcome. The stress state is triggered by a persistent signal requiring three consecutive days of confirmation, not a single spike. The Omega objective rewards consistent gains over losses across all market conditions, not just survival of the worst month. And the COVID exclusion test confirms the edge exists in the other 23 years of data, not only in the four months the FIN 440 model was implicitly built around.
 
 ------------------------------------------------------------------------
 
