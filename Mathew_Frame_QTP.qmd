@@ -76,7 +76,25 @@ spy_test     <- ret_test  %>% dplyr::filter(symbol == "SPY")
 
 ## 1. Intuitive Rationale
 
-*\[Strategy thesis, clustering rationale, failure conditions, paper citations.\]*
+### Strategy Thesis
+
+This strategy tests one hypothesis: that sector ETFs temporarily deviate from their co-moving peers and that those deviations are more likely to revert than persist. The mechanism being tested is whether unsupervised clustering on rolling return correlations can identify which ETFs genuinely move together, and whether overweighting the recent underperformer within each group generates risk-adjusted returns above a passive SPY benchmark. This project does not assume the hypothesis is correct. It tests it honestly, with full acknowledgment of where and why it fails.
+
+### What Clustering Adds
+
+A naive mean-reversion strategy would buy any ETF that has dropped recently. The problem is that not all ETFs are comparable: buying XLE because it underperformed XLK assumes those two sectors share a common driver, which they often do not. Clustering first identifies which ETFs are genuinely co-moving in the current market environment, based on 60 days of rolling return correlations. Only within those empirically identified peer groups does the mean-reversion signal have a structural basis. The cluster membership itself is dynamic: it updates monthly as correlations shift, so the strategy adapts to changing market structure rather than assuming fixed relationships.
+
+### Why the Kalman Filter Is Required
+
+Within-cluster underperformance can have two causes: temporary noise (the ETF will revert) or a genuine trend (the ETF is repricing to a new level). Buying into a downtrend on the assumption it will revert is the single largest failure mode of mean-reversion strategies. The Kalman Filter estimates the underlying trend in each ETF's price series by smoothing out daily noise. If the smoothed slope is negative beyond a threshold, the ETF is excluded from the portfolio entirely that day, regardless of how undervalued it appears relative to its cluster. The Kalman Filter is therefore not a signal enhancer; it is a risk gate that prevents the strategy from confusing structural repricing with temporary deviation.
+
+### When This Strategy Fails
+
+This strategy is designed for range-bound, mean-reverting environments and will fail in two specific conditions. The first is sustained directional trends: when sectors are repricing to fundamentally new levels (the 2022 rate shock driving XLU and XLRE down for months), within-cluster underperformers continue underperforming and the mean-reversion bet loses repeatedly. The Kalman gate reduces this exposure but does not eliminate it entirely, particularly at the onset of a trend before the slope signal has confirmed direction. The second is correlation collapse: during systemic shocks (March 2020, September 2008), all 11 ETFs correlate toward 1.0, the cluster structure becomes meaningless, and within-cluster z-scores carry no information. The strategy's cluster quality filter addresses this by disabling trading when average intra-cluster correlation falls below a minimum threshold.
+
+### Academic Foundation
+
+Two papers motivate the design. Ajayi (2025) demonstrates that unsupervised K-Means clustering identifies the same major market regimes as parametric Markov Switching models, validating that rolling clustering captures economically meaningful structural breaks without requiring distributional assumptions. Raju (2025) uses rolling K-Means on equity return data and finds that cluster-based signals generate statistically significant return differentials across regimes (Sharpe differential of 2 to 4 points, p \< 0.01), though those results are from Indian equities where return synchronicity is higher than in U.S. markets. Morck, Yeung, and Yu (2000) show that U.S. stocks have low return synchronicity relative to emerging markets, meaning firm-specific and sector-specific variation dominates macro signals. This implies that intra-cluster dispersion in U.S. sector ETFs will be meaningful and tradeable, but that Raju's Sharpe differentials represent an upper bound rather than a replication target.
 
 ------------------------------------------------------------------------
 
