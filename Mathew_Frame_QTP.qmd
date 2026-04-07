@@ -11,11 +11,6 @@ format:
     code-fold: true
     code-summary: "Show Code"
     code-copy: true
-execute:
-  cache: true
-  freeze: auto
-  warning: false
-  message: false
 ---
 
 ```{r setup}
@@ -1354,52 +1349,6 @@ Third, overall window-to-window stability is 77.3%, compared to the near-random 
 
 ------------------------------------------------------------------------
 
-### 3.4 Strategy Architecture
-
-The complete daily decision process is summarized in the diagram below.
-
-```{mermaid}
-%%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#e0e0e0', 'primaryTextColor': '#0d1b2a', 'primaryBorderColor': '#555', 'lineColor': '#555', 'secondaryColor': '#fff2cc', 'tertiaryColor': '#ffffff'}}}%%
-flowchart TD
-    classDef startend fill:#cce5ff,stroke:#003366,stroke-width:1px;
-    classDef process fill:#e0e0e0,stroke:#555,stroke-width:1px;
-    classDef decision fill:#fff2cc,stroke:#777,stroke-width:1px;
-    classDef stress fill:#fff2cc,stroke:#777,stroke-width:1px;
-    classDef momentum fill:#ccffcc,stroke:#777,stroke-width:1px;
-    classDef nosignal fill:#e0e0e0,stroke:#555,stroke-width:1px;
-
-    A([Daily Close]):::startend
-    B["Monthly Rebalance<br/>Cluster ETFs: Defensive / Cyclical<br/>via SPY-relative features"]:::process
-    C["Daily: Equal-weighted cumulative<br/>return series per cluster"]:::process
-    D["Kalman Filter per cluster<br/>Extract adaptive long-run level"]:::process
-    E["20d SMA minus Kalman level<br/>= Momentum Spread per cluster"]:::process
-    F{"Both clusters below<br/>Kalman level?<br/>(Market Stress)"}:::decision
-    G["STRESS STATE<br/>10% Cyclical / 30% Defensive<br/>60% Cash"]:::stress
-    H{"Cyclical spread minus<br/>Defensive spread<br/>> threshold?"}:::decision
-    I["MOMENTUM CYCLICAL<br/>80% Cyclical / 20% Defensive"]:::momentum
-    J{"Defensive spread minus<br/>Cyclical spread<br/>> threshold?"}:::decision
-    K["MOMENTUM DEFENSIVE<br/>20% Cyclical / 80% Defensive"]:::stress
-    L["NO SIGNAL<br/>Hold previous allocation"]:::nosignal
-    M["Equal-weight ETFs<br/>within each cluster"]:::process
-    N["Transaction costs: 0.05%<br/>per unit weight change"]:::process
-    O([Execute at Open T+1]):::startend
-
-    A --> B --> C --> D --> E --> F
-    F -->|Yes| G
-    F -->|No| H
-    H -->|Yes| I
-    H -->|No| J
-    J -->|Yes| K
-    J -->|No| L
-    G --> M
-    I --> M
-    K --> M
-    L --> M
-    M --> N --> O
-```
-
-------------------------------------------------------------------------
-
 ## 4. Kalman Filter
 
 The Kalman Filter is a recursive algorithm that estimates the true underlying level of a noisy time series, updating its estimate each period as new data arrives. Applied to each cluster's cumulative return series, it separates genuine trend from daily noise. The result is an adaptive long-run level estimate that responds faster than a fixed 200-day moving average when conditions shift, but is not whipped around by single-day spikes. Because `dlmFilter()` runs a forward pass only, each day's estimate uses only data available up to that point. There is no look-ahead bias.
@@ -1447,7 +1396,7 @@ cluster_cum <- cluster_daily %>%
   dplyr::ungroup()
 
 # Kalman Filter: local level model, forward pass only
-KF_DW_SCALE <- 0.01  # dW/dV ratio -- tunable
+KF_DW_SCALE <- 0.001  # dW/dV ratio -- tunable. Lower = slower KF = larger spread vs 20d SMA
 
 apply_kf <- function(x, dw_scale = KF_DW_SCALE) {
   dv  <- var(diff(x), na.rm = TRUE)
@@ -1533,7 +1482,54 @@ The grey line is the raw cumulative return for each cluster. The blue line is th
 
 ## 5. Signal Generation
 
-### 5.1 Momentum Spread
+### 5.1 Strategy Architecture
+
+The complete daily decision process is summarized in the diagram below.
+
+```{mermaid}
+%%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#e0e0e0', 'primaryTextColor': '#0d1b2a', 'primaryBorderColor': '#555', 'lineColor': '#555', 'secondaryColor': '#fff2cc', 'tertiaryColor': '#ffffff'}}}%%
+flowchart TD
+    classDef startend fill:#cce5ff,stroke:#003366,stroke-width:1px;
+    classDef process fill:#e0e0e0,stroke:#555,stroke-width:1px;
+    classDef decision fill:#fff2cc,stroke:#777,stroke-width:1px;
+    classDef stress fill:#fff2cc,stroke:#777,stroke-width:1px;
+    classDef momentum fill:#ccffcc,stroke:#777,stroke-width:1px;
+    classDef nosignal fill:#e0e0e0,stroke:#555,stroke-width:1px;
+
+    A([Daily Close]):::startend
+    B["Monthly Rebalance<br/>Cluster ETFs: Defensive / Cyclical<br/>via SPY-relative features"]:::process
+    C["Daily: Equal-weighted cumulative<br/>return series per cluster"]:::process
+    D["Kalman Filter per cluster<br/>Extract adaptive long-run level"]:::process
+    E["20d SMA minus Kalman level<br/>= Momentum Spread per cluster"]:::process
+    F{"Both clusters below<br/>Kalman level?<br/>(Market Stress)"}:::decision
+    G["STRESS STATE<br/>10% Cyclical / 30% Defensive<br/>60% Cash"]:::stress
+    H{"Cyclical spread minus<br/>Defensive spread<br/>> threshold?"}:::decision
+    I["MOMENTUM CYCLICAL<br/>80% Cyclical / 20% Defensive"]:::momentum
+    J{"Defensive spread minus<br/>Cyclical spread<br/>> threshold?"}:::decision
+    K["MOMENTUM DEFENSIVE<br/>20% Cyclical / 80% Defensive"]:::stress
+    L["NO SIGNAL<br/>Hold previous allocation"]:::nosignal
+    M["Equal-weight ETFs<br/>within each cluster"]:::process
+    N["Transaction costs: 0.05%<br/>per unit weight change"]:::process
+    O([Execute at Open T+1]):::startend
+
+    A --> B --> C --> D --> E --> F
+    F -->|Yes| G
+    F -->|No| H
+    H -->|Yes| I
+    H -->|No| J
+    J -->|Yes| K
+    J -->|No| L
+    G --> M
+    I --> M
+    K --> M
+    L --> M
+    M --> N --> O
+```
+
+------------------------------------------------------------------------
+
+
+### 5.2 Momentum Spread
 
 The momentum spread is the 20d SMA minus the Kalman level for each cluster each day. A positive spread means the cluster is running above its long-run trend. A negative spread means it has pulled back below. The stress state fires when both spreads are negative simultaneously.
 
@@ -1568,11 +1564,440 @@ ggplot(spread_df, aes(x = date, y = spread)) +
         strip.text      = element_text(face = "bold", size = 11))
 ```
 
+```{r signal-export-build}
+#| message: false
+#| warning: false
+#| echo: false
+
+# Cluster-level signals pivoted wide
+signals_wide <- cluster_signals %>%
+  dplyr::filter(!is.na(sma_20)) %>%
+  dplyr::mutate(spread = sma_20 - kf_level) %>%
+  tidyr::pivot_wider(
+    id_cols     = date,
+    names_from  = cluster_label,
+    values_from = c(cum_ret, kf_level, sma_20, spread)
+  ) %>%
+  dplyr::rename(
+    cyclical_cum_ret  = cum_ret_Cyclical,
+    defensive_cum_ret = cum_ret_Defensive,
+    cyclical_kf       = kf_level_Cyclical,
+    defensive_kf      = kf_level_Defensive,
+    cyclical_sma20    = sma_20_Cyclical,
+    defensive_sma20   = sma_20_Defensive,
+    cyclical_spread   = spread_Cyclical,
+    defensive_spread  = spread_Defensive
+  )
+
+# Cluster label per ETF (static)
+etf_clusters <- cluster_assignments_spy %>%
+  dplyr::mutate(
+    cluster_label = dplyr::if_else(cluster == cyclical_id, "Cyclical", "Defensive")
+  ) %>%
+  dplyr::select(symbol, cluster_label)
+
+# Wide: one row per date, one column per ETF for ret and adjusted
+ret_wide_export <- ret_train %>%
+  dplyr::filter(symbol %in% sector_tickers) %>%
+  dplyr::select(date, symbol, ret) %>%
+  tidyr::pivot_wider(names_from = symbol, values_from = ret,
+                     names_prefix = "ret_")
+
+adj_wide_export <- ret_train %>%
+  dplyr::filter(symbol %in% sector_tickers) %>%
+  dplyr::select(date, symbol, adjusted) %>%
+  tidyr::pivot_wider(names_from = symbol, values_from = adjusted,
+                     names_prefix = "adj_")
+
+# Cluster label row (static -- same every date, useful for Excel lookups)
+# Forward-fill rolling cluster assignments from month-end to all trading dates
+all_trading_dates <- ret_train %>%
+  dplyr::filter(symbol == "XLK") %>%
+  dplyr::arrange(date) %>%
+  dplyr::select(date)
+
+rolling_clusters_filled <- tidyr::expand_grid(
+  date   = all_trading_dates$date,
+  symbol = sector_tickers
+) %>%
+  dplyr::left_join(
+    rolling_spy %>% dplyr::select(date, symbol, cluster),
+    by = c("date", "symbol")
+  ) %>%
+  dplyr::arrange(symbol, date) %>%
+  dplyr::group_by(symbol) %>%
+  tidyr::fill(cluster, .direction = "down") %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(cluster = dplyr::if_else(cluster == "Cyclical", 1L, 0L))
+
+# Pivot cluster labels wide: one column per ETF per date
+cluster_wide_rolling <- rolling_clusters_filled %>%
+  tidyr::pivot_wider(names_from = symbol, values_from = cluster,
+                     names_prefix = "cluster_")
+
+etf_export <- signals_wide %>%
+  dplyr::left_join(ret_wide_export, by = "date") %>%
+  dplyr::left_join(adj_wide_export, by = "date") %>%
+  dplyr::left_join(cluster_wide_rolling, by = "date") %>%
+  dplyr::arrange(date)
+```
+
+### 5.2 Signal Classification
+
+```{r signal-classification}
+#| message: false
+#| warning: false
+#| echo: false
+
+SIGNAL_THRESHOLD    <- 0.010   # minimum absolute spread to trigger momentum signal
+MAGNITUDE_THRESHOLD <- 0.080   # absolute spread level that triggers stress state
+STRESS_DAYS         <- 3       # consecutive days stress must fire before confirming state
+
+signal_states <- spread_df %>%
+  dplyr::select(date, cluster_label, spread) %>%
+  tidyr::pivot_wider(names_from = cluster_label, values_from = spread) %>%
+  dplyr::arrange(date) %>%
+  dplyr::mutate(
+    # Raw stress flag each day
+    stress_raw = (Cyclical < 0 & Defensive < 0) |
+                 abs(Cyclical) > MAGNITUDE_THRESHOLD |
+                 abs(Defensive) > MAGNITUDE_THRESHOLD,
+    # Stress confirmed only after STRESS_DAYS consecutive days
+    stress_confirmed = slider::slide_lgl(
+      stress_raw, ~all(.x), .before = STRESS_DAYS - 1, .complete = TRUE
+    ),
+    stress_confirmed = tidyr::replace_na(stress_confirmed, FALSE),
+    signal = dplyr::case_when(
+      stress_confirmed                                          ~ "Stress",
+      Cyclical > SIGNAL_THRESHOLD & Cyclical >= Defensive      ~ "Momentum Cyclical",
+      Defensive > SIGNAL_THRESHOLD & Defensive > Cyclical      ~ "Momentum Defensive",
+      TRUE                                                      ~ "No Signal"
+    ),
+    signal = factor(signal,
+                    levels = c("Momentum Cyclical", "Momentum Defensive",
+                               "Stress", "No Signal"))
+  )
+```
+
+```{r signal-timeline}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-width: 11
+#| fig-height: 3
+
+ggplot(signal_states, aes(x = date, y = 1, fill = signal)) +
+  geom_tile() +
+  scale_fill_manual(values = c(
+    "Momentum Cyclical"  = "#d7191c",
+    "Momentum Defensive" = "#2c7bb6",
+    "Stress"             = "#f4a736",
+    "No Signal"          = "#cccccc"
+  )) +
+  labs(
+    title   = "Daily Signal State: Training Period",
+    subtitle = paste0("Signal threshold = ", SIGNAL_THRESHOLD,
+                      ". Magnitude threshold = ", MAGNITUDE_THRESHOLD, "."),
+    x       = NULL,
+    y       = NULL,
+    fill    = "Signal State",
+    caption = "Training period June 2000 to December 2024. Signal computed at Close(t), executed at Open(t+1)."
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.y  = element_blank(),
+        panel.grid   = element_blank(),
+        legend.position = "bottom")
+```
+
+```{r signal-summary-table}
+#| message: false
+#| warning: false
+#| echo: false
+
+signal_states %>%
+  dplyr::count(signal) %>%
+  dplyr::mutate(pct = round(n / sum(n) * 100, 1)) %>%
+  dplyr::rename(State = signal, Days = n, `%` = pct) %>%
+  gt::gt() %>%
+  gt::tab_header(
+    title    = "Signal State Frequency: Training Period",
+    subtitle = "June 2000 to December 2024."
+  ) %>%
+  gt::fmt_number(columns = Days, decimals = 0) %>%
+  gt::tab_style(
+    style     = gt::cell_text(weight = "bold"),
+    locations = gt::cells_column_labels()
+  ) %>%
+  gt::data_color(
+    columns = `%`,
+    palette = c("white", "#2c7bb6"),
+    domain  = c(0, 60)
+  )
+```
+
 ------------------------------------------------------------------------
 
 ## 6. Execution and Implementation
 
-*\[Mermaid mental model, execution rules, signal lag, transaction costs, position sizing.\]*
+### 6.1 Dividend Data
+
+Before building the execution loop, dividend data is verified. Dividends are collected daily using ex-dividend dates from `quantmod::getDividends()`. On each ex-dividend date, cash increases by `shares_held * dividend_per_share`. This cash is included in portfolio value the following day, so it is proportionally reinvested through the normal weight calculation without any special reinvestment logic.
+
+```{r dividend-pull}
+#| message: false
+#| warning: false
+#| echo: false
+
+dividends_raw <- purrr::map_dfr(sector_tickers, ~ {
+  x <- quantmod::getDividends(.x, from = "2000-06-01", to = "2026-03-31",
+                               auto.assign = FALSE)
+  if (is.null(x) || length(x) == 0) return(NULL)
+  tibble::tibble(
+    symbol   = .x,
+    date     = zoo::index(x),
+    dividend = as.numeric(x)
+  )
+}) %>%
+  dplyr::filter(!is.na(dividend), dividend > 0) %>%
+  dplyr::arrange(symbol, date)
+
+# Summary table
+dividends_raw %>%
+  dplyr::group_by(symbol) %>%
+  dplyr::summarise(
+    `First Ex-Date`  = min(date),
+    `Last Ex-Date`   = max(date),
+    `Total Payments` = dplyr::n(),
+    `Avg Dividend`   = round(mean(dividend), 4),
+    `Total Paid`     = round(sum(dividend), 4),
+    .groups          = "drop"
+  ) %>%
+  dplyr::rename(Symbol = symbol) %>%
+  gt::gt() %>%
+  gt::tab_header(
+    title    = "Dividend Data Verification: SPDR Sector ETFs",
+    subtitle = "Source: quantmod::getDividends(). Ex-dividend dates and amounts."
+  ) %>%
+  gt::fmt_number(columns = c(`Avg Dividend`, `Total Paid`), decimals = 4) %>%
+  gt::fmt_number(columns = `Total Payments`, decimals = 0) %>%
+  gt::tab_style(
+    style     = gt::cell_text(weight = "bold"),
+    locations = gt::cells_column_labels()
+  ) %>%
+  gt::tab_source_note("Dividends added to cash on ex-date. Reinvested proportionally through daily weight calculation.")
+```
+
+### 6.2 Data Preparation
+
+```{r execution-data-prep}
+#| message: false
+#| warning: false
+#| echo: false
+
+INITIAL_CAPITAL <- 1000000
+TC_RATE         <- 0.0005   # 0.05% per unit of trade value
+
+# Raw open and close prices (not adjusted -- dividends handled separately)
+prices_wide <- raw %>%
+  dplyr::filter(symbol %in% sector_tickers) %>%
+  dplyr::select(symbol, date, open, close) %>%
+  tidyr::pivot_wider(
+    names_from  = symbol,
+    values_from = c(open, close),
+    names_glue  = "{symbol}_{.value}"
+  ) %>%
+  dplyr::arrange(date)
+
+# SPY raw prices for benchmark
+spy_prices <- raw %>%
+  dplyr::filter(symbol == "SPY") %>%
+  dplyr::select(date, spy_open = open, spy_close = close) %>%
+  dplyr::arrange(date)
+
+# Dividends wide: one column per ETF, 0 on non-dividend days
+div_wide <- dividends_raw %>%
+  dplyr::filter(date >= "2000-06-01", date <= "2026-03-31") %>%
+  tidyr::pivot_wider(
+    names_from   = symbol,
+    values_from  = dividend,
+    names_prefix = "div_",
+    values_fill  = 0
+  )
+
+# Rolling cluster assignments forward-filled (1 = Cyclical, 0 = Defensive)
+cluster_wide_daily <- rolling_clusters_filled %>%
+  tidyr::pivot_wider(
+    names_from  = symbol,
+    values_from = cluster,
+    names_prefix = "clust_"
+  )
+
+# Master loop dataframe: one row per trading day with all inputs
+loop_data <- prices_wide %>%
+  dplyr::left_join(div_wide,            by = "date") %>%
+  dplyr::left_join(cluster_wide_daily,  by = "date") %>%
+  dplyr::left_join(
+    signal_states %>% dplyr::select(date, signal),
+    by = "date"
+  ) %>%
+  dplyr::arrange(date) %>%
+  # Training period only -- test period held out until Section 10
+  dplyr::filter(!is.na(signal), date <= TRAIN_END) %>%
+  # Replace NA dividends with 0
+  dplyr::mutate(dplyr::across(
+    dplyr::starts_with("div_"),
+    ~tidyr::replace_na(.x, 0)
+  ))
+
+# Sector allocation by signal state
+get_alloc <- function(sig) {
+  switch(as.character(sig),
+    "Momentum Cyclical"  = list(cyc = 0.80, def = 0.20),
+    "Momentum Defensive" = list(cyc = 0.20, def = 0.80),
+    "Stress"             = list(cyc = 0.10, def = 0.30),
+    list(cyc = 0.20, def = 0.80)   # fallback
+  )
+}
+```
+
+### 6.3 Execution Loop
+
+The loop follows the same architecture as the dynamic portfolio rebalancing exercise: history matrices pre-allocated, state carried forward day-to-day, signal lag enforced by separating signal generation (Close t) from execution (Open t+1). Portfolio value is tracked as `sum(shares * close_prices) + cash`, which correctly captures close-to-open returns on sold positions, open-to-close returns on purchased positions, and close-to-close returns on unchanged positions, without requiring explicit portionNew decomposition.
+
+```{r execution-loop}
+#| message: false
+#| warning: false
+#| echo: false
+
+n_days <- nrow(loop_data)
+
+# History matrices -- pre-allocate for performance
+portfolio_val_hist  <- numeric(n_days)
+cash_hist           <- numeric(n_days)
+tc_hist             <- numeric(n_days)
+signal_hist         <- character(n_days)
+shares_hist         <- matrix(0, nrow = n_days, ncol = length(sector_tickers),
+                               dimnames = list(NULL, sector_tickers))
+weight_hist         <- matrix(0, nrow = n_days, ncol = length(sector_tickers),
+                               dimnames = list(NULL, sector_tickers))
+
+# State variables
+current_cash        <- INITIAL_CAPITAL
+current_shares      <- setNames(rep(0, length(sector_tickers)), sector_tickers)
+pending_signal      <- NA_character_   # signal set at Close(t), executed at Open(t+1)
+last_active_signal  <- NA_character_   # last non-No-Signal state executed
+prev_pv             <- INITIAL_CAPITAL # portfolio value at previous close
+
+for (i in seq_len(n_days)) {
+
+  today        <- loop_data[i, ]
+  today_signal <- as.character(today$signal)
+
+  # ── STEP 1: Collect dividends at start of day ──────────────────────────────
+  div_income <- sum(sapply(sector_tickers, function(etf) {
+    div_col <- paste0("div_", etf)
+    if (div_col %in% names(today)) {
+      dv <- today[[div_col]]
+      if (!is.na(dv) && dv > 0) return(current_shares[[etf]] * dv)
+    }
+    0
+  }), na.rm = TRUE)
+
+  current_cash <- current_cash + div_income
+
+  # ── STEP 2: Execute pending order at Open(t) ───────────────────────────────
+  trade_cost <- 0
+
+  if (!is.na(pending_signal) && pending_signal != "No Signal") {
+    alloc <- get_alloc(pending_signal)
+
+    # Count available ETFs per cluster today (non-NA open price)
+    clust_today <- setNames(sapply(sector_tickers, function(etf) {
+      col <- paste0("clust_", etf); if (col %in% names(today)) today[[col]] else NA_integer_
+    }), sector_tickers)
+
+    avail_cyc <- sector_tickers[!is.na(clust_today) & clust_today == 1 &
+                                  !is.na(sapply(sector_tickers, function(e) today[[paste0(e, "_open")]]))]
+    avail_def <- sector_tickers[!is.na(clust_today) & clust_today == 0 &
+                                  !is.na(sapply(sector_tickers, function(e) today[[paste0(e, "_open")]]))]
+
+    n_cyc <- length(avail_cyc)
+    n_def <- length(avail_def)
+
+    # Target weight per ETF: cluster allocation / count of available ETFs in cluster
+    target_w <- setNames(rep(0, length(sector_tickers)), sector_tickers)
+    if (n_cyc > 0) target_w[avail_cyc] <- alloc$cyc / n_cyc
+    if (n_def > 0) target_w[avail_def] <- alloc$def / n_def
+
+    # Target dollars based on previous close portfolio value
+    target_dollars <- prev_pv * target_w
+
+    # Execute at open: compute new shares and cash flows
+    new_shares <- current_shares
+    for (etf in sector_tickers) {
+      open_p <- today[[paste0(etf, "_open")]]
+      if (is.na(open_p) || open_p <= 0) next
+      new_shares[[etf]]  <- target_dollars[[etf]] / open_p
+      delta_shares       <- new_shares[[etf]] - current_shares[[etf]]
+      current_cash       <- current_cash - (delta_shares * open_p)
+      trade_cost         <- trade_cost + abs(delta_shares * open_p) * TC_RATE
+    }
+
+    current_cash   <- current_cash - trade_cost
+    current_shares <- new_shares
+    last_active_signal <- pending_signal
+  }
+
+  # ── STEP 3: Mark portfolio to close ────────────────────────────────────────
+  equity_value <- sum(sapply(sector_tickers, function(etf) {
+    close_p <- today[[paste0(etf, "_close")]]
+    if (!is.na(close_p) && close_p > 0) current_shares[[etf]] * close_p else 0
+  }), na.rm = TRUE)
+
+  portfolio_value <- equity_value + current_cash
+
+  # ── STEP 4: Store history ───────────────────────────────────────────────────
+  portfolio_val_hist[i] <- portfolio_value
+  cash_hist[i]          <- current_cash
+  tc_hist[i]            <- trade_cost
+  signal_hist[i]        <- today_signal
+  shares_hist[i, ]      <- current_shares
+
+  if (portfolio_value > 0) {
+    for (etf in sector_tickers) {
+      close_p <- today[[paste0(etf, "_close")]]
+      if (!is.na(close_p) && close_p > 0)
+        weight_hist[i, etf] <- (current_shares[[etf]] * close_p) / portfolio_value
+    }
+  }
+
+  # ── STEP 5: Set pending signal for tomorrow ─────────────────────────────────
+  # Pending fires when signal changes AND new signal is active (not No Signal)
+  prev_signal    <- if (i == 1) NA_character_ else signal_hist[i - 1]
+  pending_signal <- dplyr::case_when(
+    is.na(prev_signal) & today_signal != "No Signal" ~ today_signal,  # day 1 entry
+    !is.na(prev_signal) & today_signal != prev_signal &
+      today_signal != "No Signal"                    ~ today_signal,  # signal change
+    TRUE                                             ~ NA_character_   # no trade
+  )
+
+  prev_pv <- portfolio_value
+}
+
+# Assemble results dataframe
+backtest_results <- loop_data %>%
+  dplyr::select(date) %>%
+  dplyr::mutate(
+    portfolio_value = portfolio_val_hist,
+    cash            = cash_hist,
+    tc              = tc_hist,
+    signal          = signal_hist
+  ) %>%
+  dplyr::bind_cols(
+    as_tibble(weight_hist) %>%
+      dplyr::rename_with(~paste0("w_", .x))
+  )
+```
 
 ------------------------------------------------------------------------
 
