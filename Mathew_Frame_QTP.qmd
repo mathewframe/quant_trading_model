@@ -1789,6 +1789,8 @@ dividends_raw %>%
 
 ### 6.2 Data Preparation
 
+The strategy is initialized with $1,000,000 in capital. A portfolio of this size is realistic for a high-net-worth individual or small institutional.
+
 ```{r execution-data-prep}
 #| message: false
 #| warning: false
@@ -1862,7 +1864,7 @@ get_alloc <- function(sig) {
 
 ### 6.3 Execution Loop
 
-The loop follows the same architecture as the dynamic portfolio rebalancing exercise: history matrices pre-allocated, state carried forward day-to-day, signal lag enforced by separating signal generation (Close t) from execution (Open t+1). Portfolio value is tracked as `sum(shares * close_prices) + cash`, which correctly captures close-to-open returns on sold positions, open-to-close returns on purchased positions, and close-to-close returns on unchanged positions, without requiring explicit portionNew decomposition.
+The loop follows the same architecture as the dynamic portfolio rebalancing exercise: history matrices pre-allocated, state carried forward day-to-day, signal lag enforced by separating signal generation (Close t) from execution (Open t+1). Portfolio value is tracked as `sum(shares * close_prices) + cash`, which correctly captures close-to-open returns on sold positions, open-to-close returns on purchased positions, and close-to-close returns on unchanged positions.
 
 ```{r execution-loop}
 #| message: false
@@ -1999,11 +2001,264 @@ backtest_results <- loop_data %>%
   )
 ```
 
+### 6.4 Implementation Assumptions
+
+**Signal timing and execution lag.** The signal is generated at each day's close using only information available up to that point. No position change is executed until the following day's open. This one-day lag is enforced throughout the loop by storing a pending signal at the end of each day and acting on it at the start of the next. The practical implication is that the strategy can never trade on the same day it detects a signal, which eliminates a common source of look-ahead bias in backtesting.
+
+**Dollar weighting at previous close.** Target dollar allocations are computed using the portfolio value at the previous day's close, and shares are determined by dividing those dollar targets by the next morning's open price. This means the capital deployed per ETF is fixed the night before, and the open price only determines share count. The result is that there is no slippage from execution order: sells and buys net to zero regardless of which ETF is processed first. The overnight gap between yesterday's close and today's open is a real return that is captured in the portfolio value path, not a source of error.
+
+**Partial shares.** The loop assumes fractional share ownership, so a \$16,400 allocation to XLK at \$230 per share results in 71.30 shares held. Real ETF execution requires whole shares, which introduces a small rounding residual at each rebalance. At a \$1,000,000 portfolio level this error is economically negligible, and the assumption is standard practice in academic backtesting. It is acknowledged as a deviation from live execution.
+
+**Dividends.** Dividends are collected on the ex-dividend date using `quantmod::getDividends()` and added directly to cash. The following day, when portfolio value is used to compute target dollar allocations, the dividend cash is included proportionally across all positions through the normal weight calculation. This is equivalent to immediate reinvestment without requiring a separate reinvestment step. The timing of dividends relative to ex-date versus payment date introduces a small lag versus real cash flows, but ex-date is the correct economic event for a mark-to-market portfolio.
+
+**Transaction costs.** A flat rate of 0.05% is applied to the absolute value of each trade on execution days, including the initial entry. This is a conservative estimate for liquid large-cap ETFs, where bid-ask spreads and market impact are typically lower. The rate is applied symmetrically to both buys and sells. No financing costs are charged on the cash position held during stress periods, which slightly understates the cost of capital preservation relative to a real fund that would earn the risk-free rate on that cash.
+
+**No market impact.** The backtest assumes all trades execute at the published open price regardless of size. A \$1,000,000 portfolio rotating 60% of capital in a single session is unlikely to move prices on SPY sector ETFs, which trade billions of dollars daily. The assumption is reasonable at this portfolio scale and would require revisiting if the strategy were scaled to institutional size.
+
+**Cash earns zero.** The 60% cash allocation in the stress state earns no return. In practice this capital would sit in a money market fund or short-duration Treasuries earning the risk-free rate, which over a multi-month stress period is a meaningful omission. This assumption is conservative: it understates strategy returns during stress periods and therefore does not flatter the results.
+
 ------------------------------------------------------------------------
 
 ## 7. Training Period Backtest
 
-*\[Equity curve vs SPY, drawdown chart, performance table.\]*
+```{r backtest-prep}
+#| message: false
+#| warning: false
+#| echo: false
+
+# Strategy daily returns
+strategy_returns <- backtest_results %>%
+  dplyr::arrange(date) %>%
+  dplyr::mutate(
+    strat_ret = portfolio_value / dplyr::lag(portfolio_value) - 1
+  ) %>%
+  dplyr::filter(!is.na(strat_ret))
+
+# SPY benchmark: adjusted close (dividends already embedded)
+spy_bench <- raw %>%
+  dplyr::filter(symbol == "SPY", date >= min(strategy_returns$date),
+                date <= TRAIN_END) %>%
+  dplyr::select(date, spy_adj = adjusted) %>%
+  dplyr::arrange(date) %>%
+  dplyr::mutate(
+    spy_ret   = spy_adj / dplyr::lag(spy_adj) - 1,
+    spy_value = 1000000 * (spy_adj / dplyr::first(spy_adj))
+  )
+
+# Combined for plotting
+combined <- strategy_returns %>%
+  dplyr::left_join(spy_bench %>% dplyr::select(date, spy_ret, spy_value),
+                   by = "date") %>%
+  dplyr::mutate(
+    strat_idx = portfolio_value / dplyr::first(portfolio_value) * 100,
+    spy_idx   = spy_value / dplyr::first(spy_value) * 100,
+    # Trade flag: 1 if signal changed and trade fired
+    trade_flag = dplyr::if_else(tc > 0, 1L, 0L),
+    # Position encoding
+    pos_num = dplyr::case_when(
+      signal == "Momentum Cyclical"  ~  1,
+      signal == "No Signal"          ~  0,
+      signal == "Momentum Defensive" ~ -1,
+      signal == "Stress"             ~ -2,
+      TRUE                           ~  0
+    ),
+    # Drawdowns
+    strat_peak = cummax(portfolio_value),
+    spy_peak   = cummax(spy_value),
+    strat_dd   = (portfolio_value - strat_peak) / strat_peak,
+    spy_dd     = (spy_value - spy_peak) / spy_peak
+  )
+
+# Helper: annualised return
+ann_ret <- function(r) {
+  n_years <- length(r) / 252
+  prod(1 + r, na.rm = TRUE)^(1 / n_years) - 1
+}
+
+# Helper: max drawdown
+max_dd <- function(r) {
+  cum <- cumprod(1 + r)
+  peak <- cummax(cum)
+  min((cum - peak) / peak, na.rm = TRUE)
+}
+
+# Helper: Omega ratio (threshold = 0)
+omega_ratio <- function(r, threshold = 0) {
+  gains  <- sum(pmax(r - threshold, 0), na.rm = TRUE)
+  losses <- sum(pmax(threshold - r, 0), na.rm = TRUE)
+  if (losses == 0) return(NA_real_)
+  gains / losses
+}
+
+# Helper: Calmar
+calmar <- function(r) {
+  ann <- ann_ret(r)
+  mdd <- abs(max_dd(r))
+  if (mdd == 0) return(NA_real_)
+  ann / mdd
+}
+
+strat_r <- strategy_returns$strat_ret
+spy_r   <- spy_bench$spy_ret[!is.na(spy_bench$spy_ret)]
+```
+
+### 7.1 Strategy Results Chart
+
+```{r xts-chart}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-width: 11
+#| fig-height: 7
+#| fig-keep: last
+
+# Convert to xts for quantmod-style multi-panel chart
+tick <- combined %>%
+  dplyr::select(date, strat_idx, trade_flag, pos_num, strat_idx) %>%
+  timetk::tk_xts(date_var = date)
+
+plot(tick$strat_idx,
+     main       = "Strategy Results",
+     ylab       = "Indexed to 100",
+     col        = "black",
+     lwd        = 1.2,
+     grid.ticks.on = "years")
+
+xts::addSeries(
+  tick$trade_flag,
+  main = "Trades",
+  on   = NA,
+  type = "h",
+  col  = "#2c7bb6",
+  lwd  = 1,
+  pch  = 0
+)
+
+xts::addSeries(
+  tick$pos_num,
+  main = "Position (1=Cyc, -1=Def, -2=Stress)",
+  on   = NA,
+  type = "h",
+  col  = "#2c7bb6",
+  lwd  = 1,
+  pch  = 0
+)
+
+xts::addSeries(
+  tick$strat_idx,
+  main = "CumEQ",
+  on   = NA,
+  type = "l",
+  col  = "#2c7bb6",
+  lwd  = 1,
+  pch  = 0
+)
+```
+
+### 7.2 Strategy vs SPY Equity Curve
+
+```{r equity-curve}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-width: 10
+#| fig-height: 5
+
+combined %>%
+  dplyr::select(date, Strategy = strat_idx, SPY = spy_idx) %>%
+  tidyr::pivot_longer(-date, names_to = "series", values_to = "value") %>%
+  ggplot(aes(x = date, y = value, colour = series, linewidth = series)) +
+  geom_line(alpha = 0.9) +
+  scale_colour_manual(values = c("Strategy" = "#2c7bb6", "SPY" = "#d7191c")) +
+  scale_linewidth_manual(values = c("Strategy" = 0.9, "SPY" = 0.6)) +
+  labs(
+    title    = "Strategy vs SPY: Cumulative Return (Indexed to 100)",
+    subtitle = "Training period. SPY uses adjusted close with dividends reinvested.",
+    x        = NULL, y = "Index (100 = start)", colour = NULL, linewidth = NULL,
+    caption  = "Training period June 2000 to December 2024."
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "bottom")
+```
+
+### 7.3 Drawdown Comparison
+
+```{r drawdown-chart}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-width: 10
+#| fig-height: 4
+
+combined %>%
+  dplyr::select(date, Strategy = strat_dd, SPY = spy_dd) %>%
+  tidyr::pivot_longer(-date, names_to = "series", values_to = "dd") %>%
+  ggplot(aes(x = date, y = dd * 100, colour = series, fill = series)) +
+  geom_ribbon(aes(ymin = dd * 100, ymax = 0), alpha = 0.2) +
+  geom_line(linewidth = 0.6) +
+  scale_colour_manual(values = c("Strategy" = "#2c7bb6", "SPY" = "#d7191c")) +
+  scale_fill_manual(values   = c("Strategy" = "#2c7bb6", "SPY" = "#d7191c")) +
+  labs(
+    title    = "Drawdown: Strategy vs SPY",
+    subtitle = "Drawdown from rolling peak. Strategy stress state targets capital preservation during severe drawdowns.",
+    x        = NULL, y = "Drawdown (%)", colour = NULL, fill = NULL,
+    caption  = "Training period June 2000 to December 2024."
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "bottom")
+```
+
+### 7.4 Performance Metrics
+
+```{r performance-table}
+#| message: false
+#| warning: false
+#| echo: false
+
+tibble::tibble(
+  Metric = c("Total Return (%)", "Annualised Return (%)", "Sharpe Ratio",
+             "Omega Ratio", "Sortino Ratio", "Max Drawdown (%)",
+             "Calmar Ratio", "Hit Rate (%)"),
+  Strategy = c(
+    round((dplyr::last(combined$portfolio_value) / 1e6 - 1) * 100, 2),
+    round(ann_ret(strat_r) * 100, 2),
+    round(mean(strat_r, na.rm = TRUE) / sd(strat_r, na.rm = TRUE) * sqrt(252), 3),
+    round(omega_ratio(strat_r), 3),
+    round(mean(strat_r[strat_r > 0], na.rm = TRUE) /
+            abs(mean(strat_r[strat_r < 0], na.rm = TRUE)) *
+            sqrt(252), 3),
+    round(max_dd(strat_r) * 100, 2),
+    round(calmar(strat_r), 3),
+    round(mean(strat_r > 0, na.rm = TRUE) * 100, 2)
+  ),
+  SPY = c(
+    round((dplyr::last(combined$spy_value) / 1e6 - 1) * 100, 2),
+    round(ann_ret(spy_r) * 100, 2),
+    round(mean(spy_r, na.rm = TRUE) / sd(spy_r, na.rm = TRUE) * sqrt(252), 3),
+    round(omega_ratio(spy_r), 3),
+    round(mean(spy_r[spy_r > 0], na.rm = TRUE) /
+            abs(mean(spy_r[spy_r < 0], na.rm = TRUE)) *
+            sqrt(252), 3),
+    round(max_dd(spy_r) * 100, 2),
+    round(calmar(spy_r), 3),
+    round(mean(spy_r > 0, na.rm = TRUE) * 100, 2)
+  )
+) %>%
+  gt::gt() %>%
+  gt::tab_header(
+    title    = "Training Period Performance: Strategy vs SPY",
+    subtitle = "June 2000 to December 2024. Strategy initialized at $1,000,000."
+  ) %>%
+  gt::tab_style(
+    style     = gt::cell_text(weight = "bold"),
+    locations = gt::cells_column_labels()
+  ) %>%
+  gt::tab_style(
+    style     = gt::cell_fill(color = "#f0f4ff"),
+    locations = gt::cells_body(columns = Strategy)
+  ) %>%
+  gt::tab_source_note("Sharpe and Sortino annualised using sqrt(252). Omega threshold = 0. Calmar = annualised return / abs(max drawdown).")
+```
 
 ------------------------------------------------------------------------
 
