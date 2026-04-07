@@ -979,6 +979,379 @@ Normalizing all three features before clustering is essential because they opera
 
 ## 3. Clustering
 
+### 3.1 Selecting k: Elbow Method
+
+```{r spy-features-elbow}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-width: 8
+#| fig-height: 4
+
+LOOKBACK_ELBOW <- 60   # default window; same parameter used throughout
+
+# Helper: max drawdown from a return vector
+max_dd <- function(r) {
+  prices <- cumprod(1 + r)
+  peak   <- cummax(prices)
+  min((prices - peak) / peak)
+}
+
+# Use the most recent LOOKBACK_ELBOW days of training data for static k selection
+last_date <- max(ret_train$date)
+
+window_train <- ret_train %>%
+  dplyr::filter(symbol %in% sector_tickers) %>%
+  dplyr::group_by(symbol) %>%
+  dplyr::slice_tail(n = LOOKBACK_ELBOW) %>%
+  dplyr::ungroup()
+
+spy_window <- ret_train %>%
+  dplyr::filter(symbol == "SPY") %>%
+  dplyr::slice_tail(n = LOOKBACK_ELBOW)
+
+spy_cum_ret  <- sum(spy_window$ret, na.rm = TRUE)
+spy_var      <- var(spy_window$ret, na.rm = TRUE)
+spy_mdd      <- max_dd(spy_window$ret)
+
+feature_mat <- window_train %>%
+  dplyr::group_by(symbol) %>%
+  dplyr::summarise(
+    excess_ret = sum(ret, na.rm = TRUE) - spy_cum_ret,
+    beta       = cov(ret, spy_window$ret[seq_len(dplyr::n())], use = "complete.obs") / spy_var,
+    mdd_ratio  = max_dd(ret) / spy_mdd,
+    .groups    = "drop"
+  )
+
+# Normalize (z-score scale) before clustering
+feat_scaled <- feature_mat %>%
+  dplyr::select(excess_ret, beta, mdd_ratio) %>%
+  scale()
+
+rownames(feat_scaled) <- feature_mat$symbol
+
+dist_spy <- dist(feat_scaled, method = "euclidean")
+hc_spy   <- hclust(dist_spy, method = "ward.D2")
+
+# WSS for k = 1:8
+compute_wss_spy <- function(k) {
+  if (k == 1) {
+    total_wss <- sum(as.matrix(dist_spy)^2) / (2 * nrow(feat_scaled))
+    return(tibble::tibble(k = k, wss = total_wss))
+  }
+  labs <- cutree(hc_spy, k = k)
+  total_wss <- sum(sapply(unique(labs), function(cl) {
+    members <- which(labs == cl)
+    if (length(members) < 2) return(0)
+    sub_d <- as.matrix(dist_spy)[members, members]
+    sum(sub_d^2) / (2 * length(members))
+  }))
+  tibble::tibble(k = k, wss = total_wss)
+}
+
+wss_spy <- purrr::map_dfr(1:8, compute_wss_spy)
+
+ggplot(wss_spy, aes(x = k, y = wss)) +
+  geom_line(colour = "#2c7bb6", linewidth = 0.9) +
+  geom_point(colour = "#2c7bb6", size = 3) +
+  geom_vline(xintercept = 2, linetype = "dashed", colour = "#d7191c", linewidth = 0.8) +
+  annotate("text", x = 2.15, y = max(wss_spy$wss) * 0.95,
+           label = "Selected k = 2", colour = "#d7191c", hjust = 0, size = 3.5) +
+  scale_x_continuous(breaks = 1:8) +
+  labs(
+    title    = "Elbow Method: Within-Cluster Sum of Squares vs. Number of Clusters",
+    subtitle = "SPY-relative features: cumulative excess return, beta, max drawdown ratio. Ward.D2, Euclidean distance.",
+    x        = "Number of Clusters (k)",
+    y        = "Within-Cluster Sum of Squares (WSS)",
+    caption  = paste0("Features z-score normalized. Last ", LOOKBACK_ELBOW, " days of training data. June 2000 to December 2024.")
+  ) +
+  theme_minimal(base_size = 11)
+```
+
+The elbow is unambiguous at k = 2. The drop from k = 1 to k = 2 is roughly four times larger than the drop from k = 2 to k = 3, and the curve is nearly flat beyond that. With three SPY-relative features measuring a fundamentally one-dimensional spectrum from defensive to cyclical, two clusters captures the dominant structure without forcing a third group that the features do not clearly support.
+
+**Note for signal generation:** k = 2 produces one cluster that tracks the market closely and one that deviates from it. The deviating cluster can sit on either side of SPY: it may be the group currently outperforming the market or the group currently underperforming. The cumulative excess return feature carries the sign of that deviation, so the signal generation layer must distinguish direction within the cluster rather than assuming the "different" cluster is always the buy or always the sell.
+
+### 3.2 Hierarchical Clustering: k = 2 vs k = 3
+
+```{r spy-dendrograms}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-width: 10
+#| fig-height: 9
+
+name_map_spy <- c(
+  XLB = "Materials",      XLC = "Communications", XLE = "Energy",
+  XLF = "Financials",     XLI = "Industrials",    XLK = "Technology",
+  XLP = "Cons. Staples",  XLRE = "Real Estate",   XLV = "Health Care",
+  XLU = "Utilities",      XLY = "Cons. Disc."
+)
+
+hc_spy_named         <- hc_spy
+hc_spy_named$labels  <- name_map_spy[hc_spy$labels]
+
+p_dend2 <- factoextra::fviz_dend(
+  hc_spy_named,
+  k                   = 2,
+  k_colors            = c("#2c7bb6", "#d7191c"),
+  color_labels_by_k   = TRUE,
+  rect                = TRUE,
+  rect_fill           = TRUE,
+  horiz               = TRUE,
+  main                = "k = 2",
+  xlab                = "Height",
+  ylab                = "",
+  ggtheme             = theme_minimal(base_size = 10),
+  labels_track_height = 0.8
+) +
+  labs(caption = "SPY-relative features, Ward.D2, Euclidean distance.")
+
+p_dend3 <- factoextra::fviz_dend(
+  hc_spy_named,
+  k                   = 3,
+  k_colors            = c("#2c7bb6", "#1a9641", "#d7191c"),
+  color_labels_by_k   = TRUE,
+  rect                = TRUE,
+  rect_fill           = TRUE,
+  horiz               = TRUE,
+  main                = "k = 3",
+  xlab                = "Height",
+  ylab                = "",
+  ggtheme             = theme_minimal(base_size = 10),
+  labels_track_height = 0.8
+)
+
+p_dend2 / p_dend3 +
+  patchwork::plot_annotation(
+    title    = "Hierarchical Clustering of Sector ETFs (Ward.D2)",
+    subtitle = "Features: cumulative excess return vs SPY, beta, max drawdown ratio. All z-score normalized.",
+    caption  = "Training period June 2000 to December 2024."
+  )
+```
+
+```{r spy-silhouettes}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-width: 10
+#| fig-height: 5
+
+sil2     <- cluster::silhouette(cutree(hc_spy, k = 2), dist_spy)
+sil3_spy <- cluster::silhouette(cutree(hc_spy, k = 3), dist_spy)
+
+avg_sil2     <- round(mean(sil2[, 3]), 3)
+avg_sil3_spy <- round(mean(sil3_spy[, 3]), 3)
+
+p_s2 <- factoextra::fviz_silhouette(sil2, print.summary = FALSE) +
+  labs(title = paste0("k = 2  |  avg sil = ", avg_sil2), x = NULL, y = "Silhouette Width") +
+  theme_minimal(base_size = 9) +
+  theme(legend.position = "none")
+
+p_s3 <- factoextra::fviz_silhouette(sil3_spy, print.summary = FALSE) +
+  labs(title = paste0("k = 3  |  avg sil = ", avg_sil3_spy), x = NULL, y = "Silhouette Width") +
+  theme_minimal(base_size = 9) +
+  theme(legend.position = "none")
+
+p_s2 | p_s3
+```
+
+```{r spy-cluster-table}
+#| message: false
+#| warning: false
+#| echo: false
+
+K_FINAL <- 2
+
+cluster_assignments_spy <- tibble::tibble(
+  symbol  = rownames(feat_scaled),
+  cluster = cutree(hc_spy, k = K_FINAL)
+) %>%
+  dplyr::arrange(cluster, symbol) %>%
+  dplyr::mutate(sector = name_map_spy[symbol])
+
+cluster_assignments_spy %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::summarise(
+    Sectors = paste(sector, collapse = ", "),
+    Size    = dplyr::n(),
+    .groups = "drop"
+  ) %>%
+  dplyr::rename(Cluster = cluster) %>%
+  gt::gt() %>%
+  gt::tab_header(
+    title    = "Cluster Assignments at k = 2",
+    subtitle = paste0("Average silhouette width: ", avg_sil2,
+                      "  (benchmark: > 0.50 is reasonable per class notes)")
+  ) %>%
+  gt::tab_style(
+    style     = gt::cell_text(weight = "bold"),
+    locations = gt::cells_column_labels()
+  ) %>%
+  gt::tab_source_note("Assignments derived from last 60 days of training data. Labels will be revisited in rolling stability analysis.")
+```
+
+k = 2 is confirmed. Silhouette width of 0.521 clears the 0.50 benchmark from class notes and is materially above the 0.457 achieved at k = 3. Cluster 1 groups the defensive and commodity-sensitive sectors (Materials, Energy, Consumer Staples, Real Estate, Utilities, Health Care) and Cluster 2 groups the higher-beta, growth-oriented sectors (Communications, Financials, Industrials, Technology, Consumer Discretionary). This split is economically coherent: it maps directly onto the classic defensive versus cyclical distinction that drives sector rotation in practice.
+
+### 3.3 Cluster Stability Over Time
+
+Rather than relying on greedy overlap matching to track labels across rolling windows, this analysis anchors labels by economic characteristic. Each month, whichever cluster has the higher mean beta is assigned the label Cyclical; the other is assigned Defensive. Beta is a structural property that is far more persistent than pairwise correlations, so this approach produces consistent labels without depending on the arbitrary order that `hclust` assigns cluster numbers.
+
+```{r spy-rolling-stability}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-width: 11
+#| fig-height: 5
+
+LOOKBACK_ROLL <- 60
+
+all_dates_roll <- sector_train %>%
+  dplyr::filter(symbol == "XLK") %>%
+  dplyr::arrange(date) %>%
+  dplyr::pull(date)
+
+month_ends_spy <- sector_train %>%
+  dplyr::filter(symbol == "XLK") %>%
+  dplyr::mutate(ym = lubridate::floor_date(date, "month")) %>%
+  dplyr::group_by(ym) %>%
+  dplyr::slice_max(date, n = 1) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(date >= all_dates_roll[LOOKBACK_ROLL]) %>%
+  dplyr::pull(date)
+
+cluster_window_spy <- function(end_date) {
+  win_sec <- sector_train %>%
+    dplyr::filter(date <= end_date) %>%
+    dplyr::group_by(symbol) %>%
+    dplyr::slice_tail(n = LOOKBACK_ROLL) %>%
+    dplyr::ungroup()
+
+  win_spy <- spy_train %>%
+    dplyr::filter(date <= end_date) %>%
+    dplyr::slice_tail(n = LOOKBACK_ROLL)
+
+  spy_cr  <- sum(win_spy$ret, na.rm = TRUE)
+  spy_v   <- var(win_spy$ret, na.rm = TRUE)
+  spy_md  <- max_dd(win_spy$ret)
+
+  feats <- win_sec %>%
+    dplyr::group_by(symbol) %>%
+    dplyr::summarise(
+      excess_ret = sum(ret, na.rm = TRUE) - spy_cr,
+      beta       = cov(ret, win_spy$ret[seq_len(dplyr::n())],
+                       use = "complete.obs") / spy_v,
+      mdd_ratio  = max_dd(ret) / spy_md,
+      .groups    = "drop"
+    )
+
+  mat <- feats %>%
+    dplyr::select(excess_ret, beta, mdd_ratio) %>%
+    scale()
+
+  rownames(mat) <- feats$symbol
+
+  hc_w  <- hclust(dist(mat, method = "euclidean"), method = "ward.D2")
+  labs  <- cutree(hc_w, k = 2)
+
+  # Anchor label by beta: higher mean beta = Cyclical
+  mean_beta <- tapply(feats$beta, labs, mean)
+  cyclical_raw <- as.integer(names(which.max(mean_beta)))
+
+  tibble::tibble(
+    date    = end_date,
+    symbol  = feats$symbol,
+    cluster = ifelse(labs == cyclical_raw, "Cyclical", "Defensive")
+  )
+}
+
+rolling_spy <- purrr::map_dfr(month_ends_spy, cluster_window_spy)
+
+name_map_roll <- c(
+  XLB = "Materials",     XLC = "Communications", XLE = "Energy",
+  XLF = "Financials",    XLI = "Industrials",    XLK = "Technology",
+  XLP = "Cons. Staples", XLRE = "Real Estate",   XLV = "Health Care",
+  XLU = "Utilities",     XLY = "Cons. Disc."
+)
+
+heatmap_spy <- rolling_spy %>%
+  dplyr::mutate(sector = name_map_roll[symbol])
+
+ggplot(heatmap_spy, aes(x = date, y = sector, fill = cluster)) +
+  geom_tile(colour = "white", linewidth = 0.15) +
+  scale_fill_manual(
+    values = c("Cyclical" = "#d7191c", "Defensive" = "#2c7bb6"),
+    name   = "Cluster"
+  ) +
+  scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
+  labs(
+    title    = "Rolling Cluster Assignments Over Time (k = 2, 60-Day Window)",
+    subtitle = "Labels anchored by beta: higher mean beta cluster = Cyclical each month.",
+    x        = NULL,
+    y        = NULL,
+    caption  = "Training period June 2000 to December 2024. Monthly rebalancing frequency."
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(panel.grid   = element_blank(),
+        axis.text.y  = element_text(size = 9))
+```
+
+```{r spy-stability-table}
+#| message: false
+#| warning: false
+#| echo: false
+
+stability_spy <- rolling_spy %>%
+  dplyr::arrange(symbol, date) %>%
+  dplyr::group_by(symbol) %>%
+  dplyr::mutate(changed = cluster != dplyr::lag(cluster)) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(!is.na(changed)) %>%
+  dplyr::group_by(date) %>%
+  dplyr::summarise(pct_stable = mean(!changed), .groups = "drop")
+
+avg_stability_spy <- round(mean(stability_spy$pct_stable) * 100, 1)
+
+per_etf_spy <- rolling_spy %>%
+  dplyr::group_by(symbol) %>%
+  dplyr::summarise(
+    modal_cluster = names(which.max(table(cluster))),
+    pct_in_modal  = round(mean(cluster == modal_cluster) * 100, 1),
+    n_switches    = sum(cluster != dplyr::lag(cluster), na.rm = TRUE),
+    .groups       = "drop"
+  ) %>%
+  dplyr::mutate(sector = name_map_roll[symbol]) %>%
+  dplyr::select(sector, modal_cluster, pct_in_modal, n_switches) %>%
+  dplyr::arrange(dplyr::desc(pct_in_modal))
+
+per_etf_spy %>%
+  gt::gt() %>%
+  gt::tab_header(
+    title    = "Per-ETF Cluster Persistence (k = 2, Beta-Anchored Labels)",
+    subtitle = paste0("Average window-to-window stability: ", avg_stability_spy,
+                      "% of ETFs unchanged each month")
+  ) %>%
+  gt::cols_label(
+    sector        = "Sector",
+    modal_cluster = "Primary Cluster",
+    pct_in_modal  = "Time in Primary Cluster (%)",
+    n_switches    = "Cluster Switches"
+  ) %>%
+  gt::fmt_number(columns = pct_in_modal, decimals = 1) %>%
+  gt::data_color(
+    columns = pct_in_modal,
+    palette = c("#d7191c", "white", "#2c7bb6"),
+    domain  = c(50, 100)
+  ) %>%
+  gt::tab_source_note("Modal cluster = label assigned most frequently over training period. Defensive = blue, Cyclical = red.")
+```
+
+This approach is a material improvement over the correlation-only method used before the pivot. Three differences stand out. First, **silhouette width increased from roughly 0.22 to 0.521,** clearing the 0.50 benchmark from class notes. The clusters are no longer borderline arbitrary; the SPY-relative features produce groups that are meaningfully separated in feature space. 
+
+Second, the cluster assignments are economically coherent in a way the previous version was not. **Utilities and Consumer Staples sit in the Defensive cluster 89% and 87% of the time respectively,** which is exactly what market fundamentals predict: these are low-beta, stable-cash-flow sectors that behave defensively regardless of the macro environment. Technology and Financials anchor the Cyclical cluster, consistent with their higher market sensitivity. 
+
+Third, overall window-to-window stability is 77.3%, compared to the near-random switching observed in the correlation-only heatmap. The remaining instability is concentrated in sectors like Energy and Industrials that genuinely straddle the defensive-cyclical boundary depending on the macro regime, which is economically honest rather than a model failure.
+
 ------------------------------------------------------------------------
 
 ## 4. Kalman Filter
