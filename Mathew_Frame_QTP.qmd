@@ -142,7 +142,100 @@ The clustering input is not the raw return series but the pairwise correlation m
 
 ## 3. Clustering
 
-*\[Elbow method to select k, hierarchical clustering on distance matrix, silhouette validation, cluster visualization, commercial interpretation.\]*
+### 3.1 Cluster Hypothesis
+
+The following cluster assignments are stated before any computation is performed. Results will be assessed honestly against these priors.
+
+```{r cluster-hypothesis}
+#| message: false
+#| warning: false
+#| echo: false
+
+tibble::tibble(
+  Cluster       = c("Cyclical", "Defensive", "Commodity", "Rate-Sensitive"),
+  Sectors       = c("Industrials, Financials, Consumer Discretionary",
+                    "Staples, Utilities, Healthcare",
+                    "Energy, Materials",
+                    "Technology, Communication Services, Real Estate"),
+  `Core Driver` = c("GDP / growth",
+                    "Stability / recession",
+                    "Inflation / commodities",
+                    "Interest rates")
+) %>%
+  gt::gt() %>%
+  gt::tab_header(
+    title    = "Cluster Hypothesis: Expected Groupings Before Computation",
+    subtitle = "Stated prior to running the elbow method or hierarchical clustering."
+  ) %>%
+  gt::tab_style(
+    style     = gt::cell_text(weight = "bold"),
+    locations = gt::cells_column_labels()
+  ) %>%
+  gt::cols_width(Cluster        ~ px(160),
+                 Sectors        ~ px(300),
+                 `Core Driver`  ~ px(200)) %>%
+  gt::tab_source_note("Hypothesis informed by sector economic characteristics, not by training data.")
+```
+
+### 3.2 Selecting k: Elbow Method
+
+```{r elbow-method}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-width: 8
+#| fig-height: 4
+
+# Compute average correlation matrix over full training period
+ret_wide_train <- sector_train %>%
+  dplyr::select(date, symbol, ret) %>%
+  tidyr::pivot_wider(names_from = symbol, values_from = ret) %>%
+  dplyr::arrange(date) %>%
+  dplyr::select(-date)
+
+cor_mat  <- cor(ret_wide_train, use = "pairwise.complete.obs")
+dist_mat <- as.dist(1 - cor_mat)
+
+# Hierarchical clustering
+hc <- hclust(dist_mat, method = "ward.D2")
+
+# WSS for k = 2 to 8
+compute_wss <- function(k) {
+  labels    <- cutree(hc, k = k)
+  centroids <- tapply(seq_along(labels), labels, function(idx) idx)
+  total_wss <- sum(sapply(unique(labels), function(cl) {
+    members <- names(labels[labels == cl])
+    if (length(members) < 2) return(0)
+    sub_dist <- as.matrix(dist_mat)[members, members]
+    sum(sub_dist^2) / (2 * length(members))
+  }))
+  tibble::tibble(k = k, wss = total_wss)
+}
+
+wss_df <- purrr::map_dfr(1:8, compute_wss)
+
+ggplot(wss_df, aes(x = k, y = wss)) +
+  geom_line(colour = "#2c7bb6", linewidth = 0.9) +
+  geom_point(colour = "#2c7bb6", size = 3) +
+  geom_vline(xintercept = 3, linetype = "dashed", colour = "#d7191c", linewidth = 0.8) +
+  annotate("text", x = 3.2, y = max(wss_df$wss) * 0.95,
+           label = "Selected k = 3", colour = "#d7191c", hjust = 0, size = 3.5) +
+  scale_x_continuous(breaks = 1:8) +
+  labs(
+    title    = "Elbow Method: Within-Cluster Sum of Squares vs. Number of Clusters",
+    subtitle = "Training period average correlation matrix. Ward.D2 hierarchical clustering.",
+    x        = "Number of Clusters (k)",
+    y        = "Within-Cluster Sum of Squares (WSS)",
+    caption  = "Distance metric: d(i,j) = 1 - corr(i,j). Training period June 2000 to December 2024."
+  ) +
+  theme_minimal(base_size = 11)
+```
+
+Despite my initial hypothesis being k = 4, **the elbow I see is at k = 3.** There is a meaningful reduction in WSS from 3 -\> 4, but the decision to use k = 3 comes from the change in slope from 2 -\> 4 having a sharper angle than 3 -\> 5. There is no right answer here, but using 4 clusters creates the risk of weak clusters that change often, leading to increased transaction costs for the trading strategy.
+
+### 3.3 Hierarchical Clustering
+
+*\[To be built after k is confirmed from elbow method above.\]*
 
 ------------------------------------------------------------------------
 
