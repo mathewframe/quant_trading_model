@@ -3382,8 +3382,10 @@ combined_test <- test_results %>%
     xlk_idx    = xlk_value  / dplyr::first(xlk_value)  * 100,
     strat_peak = cummax(portfolio_value),
     spy_peak   = cummax(spy_value),
+    ew_peak    = cummax(ew_value),
     strat_dd   = (portfolio_value - strat_peak) / strat_peak,
-    spy_dd     = (spy_value - spy_peak) / spy_peak
+    spy_dd     = (spy_value - spy_peak) / spy_peak,
+    ew_dd      = (ew_value - ew_peak) / ew_peak
   )
 
 combined_test %>%
@@ -3417,6 +3419,8 @@ combined_test %>%
   theme(legend.position = "bottom")
 ```
 
+The strategy underperformed all three benchmarks on total return over the 15-month test window, finishing at 6.5% versus SPY at 9.7%, Equal-Weight at 14.7%, and XLK at 10.8%. The honest explanation for most of that gap is that the technology sector had an exceptional run driven by AI investment themes, and SPY, Equal-Weight, and XLK all carried meaningful tech exposure. This strategy did not overweight technology, which is the correct decision — adding XLK exposure in hindsight would be speculative, not systematic, and would defeat the purpose of a rule-based signal. The strategy was not designed to chase sector momentum; it was designed to rotate between two structurally distinct clusters with risk control built in. Judged on that mandate, the equity curve tells a story of lower participation during the bull run but also visibly less damage during the April 2025 tariff shock and more stability through the volatile late-2025 period when all three benchmarks gave back gains.
+
 ### 10.2 Drawdown Comparison
 
 ```{r test-drawdown}
@@ -3427,13 +3431,21 @@ combined_test %>%
 #| fig-height: 4
 
 combined_test %>%
-  dplyr::select(date, Strategy = strat_dd, SPY = spy_dd) %>%
+  dplyr::select(date, Strategy = strat_dd, SPY = spy_dd, `Equal-Weight` = ew_dd) %>%
   tidyr::pivot_longer(-date, names_to = "series", values_to = "dd") %>%
   ggplot(aes(x = date, y = dd * 100, colour = series, fill = series)) +
-  geom_ribbon(aes(ymin = dd * 100, ymax = 0), alpha = 0.2) +
+  geom_ribbon(aes(ymin = dd * 100, ymax = 0), alpha = 0.15) +
   geom_line(linewidth = 0.6) +
-  scale_colour_manual(values = c("Strategy" = "#2c7bb6", "SPY" = "#d7191c")) +
-  scale_fill_manual(values   = c("Strategy" = "#2c7bb6", "SPY" = "#d7191c")) +
+  scale_colour_manual(values = c(
+    "Strategy"     = "#2c7bb6",
+    "SPY"          = "#d7191c",
+    "Equal-Weight" = "#1a9641"
+  )) +
+  scale_fill_manual(values = c(
+    "Strategy"     = "#2c7bb6",
+    "SPY"          = "#d7191c",
+    "Equal-Weight" = "#1a9641"
+  )) +
   labs(
     title    = "Testing Period: Drawdown Comparison",
     subtitle = "Drawdown from rolling peak. January 2025 to March 2026.",
@@ -3443,6 +3455,8 @@ combined_test %>%
   theme_minimal(base_size = 11) +
   theme(legend.position = "bottom")
 ```
+
+The drawdown chart is the clearest evidence in favour of the strategy's design. During the April 2025 tariff shock, SPY fell approximately 18% from peak and Equal-Weight fell roughly 15%, while the strategy's maximum drawdown was -5.6% across the entire test window. The stress detection mechanism appears to have done meaningful work during that episode, reducing equity exposure before or during the sharpest phase of the selloff. The strategy also held its value through the late-2025 period where the other benchmarks were flat to negative, which is visible as the blue line staying elevated while red and green declined. These are the conditions the stress state was designed for, and the drawdown chart validates that the mechanism is functioning as intended.
 
 ### 10.3 Performance Metrics
 
@@ -3505,6 +3519,59 @@ tibble::tibble(
   ) %>%
   gt::tab_source_note("Equal-Weight = daily equal-weight average of all 11 sector ETFs. XLK = Technology ETF only. Sharpe/Sortino annualised using sqrt(252).")
 ```
+
+The performance table reinforces a mixed but honest verdict. On every risk-adjusted metric the strategy leads: Sharpe of 0.906 versus SPY's 0.499, Omega of 1.187 versus SPY's 1.106, Calmar of 0.982 versus SPY's 0.417, and a maximum drawdown of -5.6% against SPY's -18.8%. These numbers reflect a portfolio that genuinely managed downside risk better than any of the benchmarks shown. However, the strategy also trailed all three benchmarks on total return and annualised return, which is the harder result to dismiss. The Equal-Weight benchmark is a particular concern: it required no signal generation, no clustering, no Kalman filter, and no optimization, yet it returned 14.7% with a reasonable Omega of 1.177 and a Calmar of 0.783. That result raises a direct challenge to the value of complexity in this model. The most honest interpretation is that the strategy achieved its stated goal of capital preservation with favourable risk-adjusted metrics, but in a market environment where equities broadly trended upward over the test period, a lower-beta, more defensive posture was penalised on absolute return. **In the long run, equity markets go up, and a strategy that systematically reduces market exposure will likely underperform passive benchmarks over full cycles unless the risk reduction is severe enough to compound through avoided drawdowns** -- and 15 months is too short a window to know whether that is the case here.
+
+### 10.4 Late-2025 Zoom: October 29, 2025 Onward (Indexed to 100)
+
+```{r test-zoom-chart}
+#| message: false
+#| warning: false
+#| echo: false
+#| fig-width: 10
+#| fig-height: 5
+
+ZOOM_START <- as.Date("2025-10-29")
+
+combined_test %>%
+  dplyr::filter(date >= ZOOM_START) %>%
+  dplyr::mutate(
+    strat_z = portfolio_value / dplyr::first(portfolio_value) * 100,
+    spy_z   = spy_value       / dplyr::first(spy_value)       * 100,
+    ew_z    = ew_value        / dplyr::first(ew_value)        * 100,
+    xlk_z   = xlk_value       / dplyr::first(xlk_value)       * 100
+  ) %>%
+  dplyr::select(date,
+                Strategy       = strat_z,
+                SPY            = spy_z,
+                `Equal-Weight` = ew_z,
+                XLK            = xlk_z) %>%
+  tidyr::pivot_longer(-date, names_to = "series", values_to = "value") %>%
+  ggplot(aes(x = date, y = value, colour = series, linewidth = series)) +
+  geom_line(alpha = 0.9) +
+  scale_colour_manual(values = c(
+    "Strategy"     = "#2c7bb6",
+    "SPY"          = "#d7191c",
+    "Equal-Weight" = "#1a9641",
+    "XLK"          = "#f4a736"
+  )) +
+  scale_linewidth_manual(values = c(
+    "Strategy"     = 1.0,
+    "SPY"          = 0.6,
+    "Equal-Weight" = 0.6,
+    "XLK"          = 0.6
+  )) +
+  labs(
+    title    = "Late-2025 Zoom: Strategy vs Benchmarks (Indexed to 100)",
+    subtitle = "October 29, 2025 to March 2026. All series re-indexed to 100 at start of window.",
+    x        = NULL, y = "Index (100 = Oct 29 2025)", colour = NULL, linewidth = NULL,
+    caption  = "Equal-Weight = buy-and-hold equal allocation across all 11 sector ETFs. XLK = Technology ETF."
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "bottom")
+```
+
+It is worth being transparent about what this chart is doing: October 29, 2025 was chosen because it roughly coincides with where technology peaked before a multi-month decline, which flatters the strategy's relative performance. That is a form of **storytelling bias** — selecting a start date that makes the result look better than the full-period picture. Even acknowledging that bias explicitly, the strategy still did not outperform Equal-Weight over this window. Equal-Weight held its gains better through the late-2025 period and finished above the strategy's index level despite having no defensive mechanism at all. The strategy did protect capital relative to SPY and XLK during the drawdown period, which is consistent with its design, but the honest conclusion is that a simple passive equal allocation across all eleven sector ETFs was a harder benchmark to beat than anticipated — and this zoomed window, even when framed as favourably as possible, does not change that verdict.
 
 ------------------------------------------------------------------------
 
