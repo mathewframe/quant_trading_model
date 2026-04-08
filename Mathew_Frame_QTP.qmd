@@ -1851,7 +1851,13 @@ loop_data <- prices_wide %>%
   dplyr::mutate(dplyr::across(
     dplyr::starts_with("div_"),
     ~tidyr::replace_na(.x, 0)
-  ))
+  )) %>%
+  # Month-end flag for monthly cluster rebalancing
+  dplyr::mutate(ym = lubridate::floor_date(date, "month")) %>%
+  dplyr::group_by(ym) %>%
+  dplyr::mutate(month_end_flag = date == max(date)) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(-ym)
 
 # Sector allocation by signal state
 get_alloc <- function(sig) {
@@ -1913,8 +1919,18 @@ for (i in seq_len(n_days)) {
   # ── STEP 2: Execute pending order at Open(t) ───────────────────────────────
   trade_cost <- 0
 
-  if (!is.na(pending_signal) && pending_signal != "No Signal") {
-    alloc <- get_alloc(pending_signal)
+  # Rebalance on signal change OR on month-end (captures cluster membership shifts)
+  is_month_end <- isTRUE(loop_data$month_end_flag[i])
+  exec_sig <- if (!is.na(pending_signal) && pending_signal != "No Signal") {
+    pending_signal
+  } else if (is_month_end && !is.na(last_active_signal) && last_active_signal != "No Signal") {
+    last_active_signal
+  } else {
+    NA_character_
+  }
+
+  if (!is.na(exec_sig)) {
+    alloc <- get_alloc(exec_sig)
 
     # Count available ETFs per cluster today (non-NA open price)
     clust_today <- setNames(sapply(sector_tickers, function(etf) {
@@ -1950,7 +1966,8 @@ for (i in seq_len(n_days)) {
 
     current_cash   <- current_cash - trade_cost
     current_shares <- new_shares
-    last_active_signal <- pending_signal
+    if (!is.na(pending_signal) && pending_signal != "No Signal")
+      last_active_signal <- pending_signal
   }
 
   # ── STEP 3: Mark portfolio to close ────────────────────────────────────────
@@ -3215,7 +3232,12 @@ loop_test <- prices_wide_full %>%
   dplyr::arrange(date) %>%
   dplyr::filter(!is.na(signal), date >= TEST_START) %>%
   dplyr::mutate(dplyr::across(dplyr::starts_with("div_"),
-                               ~tidyr::replace_na(.x, 0)))
+                               ~tidyr::replace_na(.x, 0))) %>%
+  dplyr::mutate(ym = lubridate::floor_date(date, "month")) %>%
+  dplyr::group_by(ym) %>%
+  dplyr::mutate(month_end_flag = date == max(date)) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(-ym)
 ```
 
 ```{r test-execution-loop}
@@ -3238,10 +3260,11 @@ last_train_sig <- signal_full %>%
   dplyr::slice_tail(n = 1) %>%
   dplyr::pull(signal)
 
-cur_cash   <- INITIAL_CAPITAL
-cur_shares <- setNames(rep(0, length(sector_tickers)), sector_tickers)
-pend_sig   <- if (length(last_train_sig) > 0) last_train_sig else NA_character_
-prev_pv    <- INITIAL_CAPITAL
+cur_cash       <- INITIAL_CAPITAL
+cur_shares     <- setNames(rep(0, length(sector_tickers)), sector_tickers)
+pend_sig       <- if (length(last_train_sig) > 0) last_train_sig else NA_character_
+cur_active_sig <- pend_sig   # tracks last executed signal for month-end rebalancing
+prev_pv        <- INITIAL_CAPITAL
 
 for (i in seq_len(n_test)) {
   td  <- loop_test[i, ]
@@ -3255,8 +3278,18 @@ for (i in seq_len(n_test)) {
   cur_cash <- cur_cash + div_inc
 
   tc <- 0
-  if (!is.na(pend_sig) && pend_sig != "No Signal") {
-    alloc <- get_alloc(pend_sig)
+  # Rebalance on signal change OR month-end (captures shifting cluster membership)
+  is_me_t <- isTRUE(loop_test$month_end_flag[i])
+  exec_sig_t <- if (!is.na(pend_sig) && pend_sig != "No Signal") {
+    pend_sig
+  } else if (is_me_t && !is.na(cur_active_sig) && cur_active_sig != "No Signal") {
+    cur_active_sig
+  } else {
+    NA_character_
+  }
+
+  if (!is.na(exec_sig_t)) {
+    alloc <- get_alloc(exec_sig_t)
     ct <- setNames(sapply(sector_tickers, function(etf) {
       col <- paste0("clust_", etf); if (col %in% names(td)) td[[col]] else NA_integer_
     }), sector_tickers)
@@ -3278,6 +3311,8 @@ for (i in seq_len(n_test)) {
     }
     cur_cash   <- cur_cash - tc
     cur_shares <- ns
+    if (!is.na(pend_sig) && pend_sig != "No Signal")
+      cur_active_sig <- pend_sig
   }
 
   eq <- sum(sapply(sector_tickers, function(etf) {
